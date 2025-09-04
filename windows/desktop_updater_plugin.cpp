@@ -4,9 +4,11 @@
 #include <windows.h>
 #include <VersionHelpers.h>
 #include <Shlwapi.h> // Include Shlwapi.h for PathFileExistsW
+#include <shellapi.h> // ShellExecuteW for UAC elevation
 
 #pragma comment(lib, "Version.lib") // Link with Version.lib
 #pragma comment(lib, "Shlwapi.lib") // Link with Shlwapi.lib
+#pragma comment(lib, "Shell32.lib") // Link with Shell32.lib for ShellExecuteW
 
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
@@ -23,10 +25,65 @@ namespace fs = std::filesystem;
 namespace desktop_updater
 {
 
+  // Forward declarations
+  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path);
+  void runBatFile();
+
+  // Check if the application was started with elevated update arguments
+  bool CheckForElevatedUpdate()
+  {
+    int argc;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    
+    if (argv != nullptr)
+    {
+      for (int i = 1; i < argc; i++)
+      {
+        if (wcscmp(argv[i], L"--update-elevated") == 0)
+        {
+          LocalFree(argv);
+          return true;
+        }
+      }
+      LocalFree(argv);
+    }
+    return false;
+  }
+
+  // Execute the update process when running elevated
+  void ExecuteElevatedUpdate()
+  {
+    printf("Executing elevated update process...\n");
+    
+    // Get the current executable file path
+    wchar_t executable_path[MAX_PATH];
+    GetModuleFileNameW(NULL, executable_path, MAX_PATH);
+
+    printf("Executable path: %ls\n", executable_path);
+
+    // Set up update directories
+    std::wstring updateDir = L"update";
+    std::wstring destDir = L".";
+
+    // Create and run the batch file for updating
+    createBatFile(updateDir, destDir, executable_path);
+    runBatFile();
+
+    // Exit after update
+    ExitProcess(0);
+  }
+
   // static
   void DesktopUpdaterPlugin::RegisterWithRegistrar(
       flutter::PluginRegistrarWindows *registrar)
   {
+    // Check if this instance was started for elevated update
+    if (CheckForElevatedUpdate())
+    {
+      ExecuteElevatedUpdate();
+      return; // This will not be reached due to ExitProcess in ExecuteElevatedUpdate
+    }
+
     auto channel =
         std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
             registrar->messenger(), "desktop_updater",
@@ -92,6 +149,50 @@ namespace desktop_updater
     std::cout << "Temporary .bat created.\n";
   }
 
+  // Check if the current process is running with administrator privileges
+  bool IsRunningAsAdmin()
+  {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = NULL;
+
+    // Create a SID for the BUILTIN\Administrators group
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup))
+    {
+      // Check if the current user is a member of the administrators group
+      if (!CheckTokenMembership(NULL, adminGroup, &isAdmin))
+      {
+        isAdmin = FALSE;
+      }
+      FreeSid(adminGroup);
+    }
+
+    return isAdmin == TRUE;
+  }
+
+  // Request administrator privileges and restart the application with elevation
+  bool RequestAdminPrivileges()
+  {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    // Use ShellExecuteW with "runas" to request elevation
+    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, L"--update-elevated", NULL, SW_SHOW);
+
+    if ((INT_PTR)result > 32)
+    {
+      // Successfully started elevated process, exit current process
+      return true;
+    }
+    else
+    {
+      // User cancelled UAC or other error
+      std::wcout << L"Failed to get administrator privileges. Error code: " << (INT_PTR)result << std::endl;
+      return false;
+    }
+  }
+
   void runBatFile()
   {
     STARTUPINFO si = {sizeof(si)};
@@ -122,6 +223,30 @@ namespace desktop_updater
   void RestartApp()
   {
     printf("Restarting the application...\n");
+
+    // First check if we're already running as administrator
+    if (!IsRunningAsAdmin())
+    {
+      printf("Not running as administrator. Requesting elevation...\n");
+      
+      // Request administrator privileges
+      if (RequestAdminPrivileges())
+      {
+        // Successfully started elevated process, exit current process
+        printf("Elevated process started. Exiting current process.\n");
+        ExitProcess(0);
+      }
+      else
+      {
+        // User cancelled UAC or elevation failed
+        printf("Failed to get administrator privileges. Update cancelled.\n");
+        return; // Don't proceed with update
+      }
+    }
+
+    // If we reach here, we're running as administrator
+    printf("Running with administrator privileges. Proceeding with update...\n");
+
     // Get the current executable file path
     char szFilePath[MAX_PATH];
     GetModuleFileNameA(NULL, szFilePath, MAX_PATH);
