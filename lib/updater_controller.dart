@@ -59,9 +59,9 @@ class DesktopUpdaterController extends ChangeNotifier {
 
   final _plugin = DesktopUpdater();
 
-  void init(Uri url) {
+  Future<void> init(Uri url) async {
     _appArchiveUrl = url;
-    checkVersion();
+    await checkVersion();
     notifyListeners();
   }
 
