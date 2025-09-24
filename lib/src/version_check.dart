@@ -24,13 +24,8 @@ Future<ItemModel?> versionCheckFunction({
 
   // Eğer belirtilen yol bir dizinse
   if (await dir.exists()) {
-    // temp dizini oluşturulur
     final tempDir = await Directory.systemTemp.createTemp("desktop_updater");
-
-    // Download oldHashFilePath
     final client = http.Client();
-
-    print("Using url: $appArchiveUrl");
 
     final appArchive = http.Request("GET", Uri.parse(appArchiveUrl));
     final appArchiveResponse = await client.send(appArchive);
@@ -48,8 +43,6 @@ Future<ItemModel?> versionCheckFunction({
 
     // Close the file
     await sink.close();
-
-    print("app archive file downloaded to ${outputFile.path}");
 
     if (!outputFile.existsSync()) {
       throw Exception("Desktop Updater: App archive do not exist");
@@ -82,8 +75,6 @@ Future<ItemModel?> versionCheckFunction({
       },
     );
 
-    print("Latest version: ${latestVersion.shortVersion}");
-
     late String? currentVersion;
 
     if (Platform.isLinux) {
@@ -92,13 +83,10 @@ Future<ItemModel?> versionCheckFunction({
       final assetPath = path.join(appPath, "data", "flutter_assets");
       final versionPath = path.join(assetPath, "version.json");
       final versionJson = jsonDecode(await File(versionPath).readAsString());
-
-      print("Current version: ${versionJson['build_number']}");
       currentVersion = versionJson["build_number"];
     } else {
       await DesktopUpdater().getCurrentVersion().then(
         (value) {
-          print("Current version: $value");
           currentVersion = value;
         },
       );
@@ -109,14 +97,8 @@ Future<ItemModel?> versionCheckFunction({
     }
 
     if (latestVersion.shortVersion > int.parse(currentVersion!)) {
-      print("New version found: ${latestVersion.version}");
-
-      // calculate totalSize
       final tempDir = await Directory.systemTemp.createTemp("desktop_updater");
-
       final client = http.Client();
-
-      print("Downloading hashes file");
 
       final newHashFileUrl = "${latestVersion.url}/hashes.json";
       final newHashFileRequest = http.Request("GET", Uri.parse(newHashFileUrl));
@@ -148,23 +130,15 @@ Future<ItemModel?> versionCheckFunction({
       final oldHashFilePath = await genFileHashes();
       final newHashFilePath = outputFile.path;
 
-      print("Old hashes file: $oldHashFilePath");
-
       final changedFiles = await verifyFileHashes(
         oldHashFilePath,
         newHashFilePath,
       );
 
-      if (changedFiles.isEmpty) {
-        print("No updates required.");
-      }
-
       return latestVersion.copyWith(
         changedFiles: changedFiles,
         appName: appArchiveDecoded.appName,
       );
-    } else {
-      print("No new version found");
     }
   }
   return null;
