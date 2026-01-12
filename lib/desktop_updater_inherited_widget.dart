@@ -5,9 +5,9 @@ class DesktopUpdaterInheritedNotifier
     extends InheritedNotifier<DesktopUpdaterController> {
   const DesktopUpdaterInheritedNotifier({
     super.key,
-    required Widget child,
+    required super.child,
     required DesktopUpdaterController controller,
-  }) : super(child: child, notifier: controller);
+  }) : super(notifier: controller);
 
   static DesktopUpdaterInheritedNotifier? of(BuildContext context) {
     return context

@@ -1,5 +1,6 @@
 import "dart:io";
 
+import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 import "package:path/path.dart" as path;
 
@@ -57,7 +58,7 @@ Future<void> downloadFile(
     onDone: () async {
       await sink.close();
       client.close();
-      print("File downloaded to $fullSavePath");
+      debugPrint("File downloaded to $fullSavePath");
     },
     onError: (e) {
       sink.close();
