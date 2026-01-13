@@ -26,8 +26,9 @@ namespace desktop_updater
 {
 
   // Forward declarations
-  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path);
+  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
   void runBatFile();
+  std::wstring FindTempUpdateDirectory();
 
   // Check if the application was started with elevated update arguments
   bool CheckForElevatedUpdate()
@@ -50,6 +51,43 @@ namespace desktop_updater
     return false;
   }
 
+  std::wstring FindTempUpdateDirectory()
+  {
+    wchar_t tempPath[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tempPath) == 0)
+    {
+      return L"";
+    }
+
+    std::wstring searchPath = std::wstring(tempPath) + L"desktop_updater_download*";
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+      do
+      {
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+          if (wcscmp(findData.cFileName, L".") != 0 && wcscmp(findData.cFileName, L"..") != 0)
+          {
+            std::wstring foundPath = std::wstring(tempPath) + findData.cFileName + L"\\update";
+            
+            if (PathFileExistsW(foundPath.c_str()))
+            {
+              FindClose(hFind);
+              return foundPath;
+            }
+          }
+        }
+      } while (FindNextFileW(hFind, &findData) != 0);
+      
+      FindClose(hFind);
+    }
+    
+    return L"";
+  }
+
   // Execute the update process when running elevated
   void ExecuteElevatedUpdate()
   {
@@ -61,12 +99,18 @@ namespace desktop_updater
 
     printf("Executable path: %ls\n", executable_path);
 
-    // Set up update directories
-    std::wstring updateDir = L"update";
+    // Try to find temp update directory first
+    std::wstring tempUpdateDir = FindTempUpdateDirectory();
+    std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
     std::wstring destDir = L".";
 
+    if (!tempUpdateDir.empty())
+    {
+      printf("Found temp update directory: %ls\n", tempUpdateDir.c_str());
+    }
+
     // Create and run the batch file for updating
-    createBatFile(updateDir, destDir, executable_path);
+    createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
     runBatFile();
 
     // Exit after update
@@ -105,7 +149,7 @@ namespace desktop_updater
   DesktopUpdaterPlugin::~DesktopUpdaterPlugin() {}
 
   // Modify the createBatFile function to accept parameters and use them in the bat script
-  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path)
+  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
   {
     // Convert wide strings to regular strings using Windows API for proper conversion
     int updateSize = WideCharToMultiByte(CP_UTF8, 0, updateDir.c_str(), -1, NULL, 0, NULL, NULL);
@@ -123,28 +167,50 @@ namespace desktop_updater
     WideCharToMultiByte(CP_UTF8, 0, executable_path, -1, &exePathStr[0], exePathSize, NULL, NULL);
     exePathStr.pop_back(); // Remove null terminator
 
+    std::string cleanupTempDir = "";
+    if (!tempUpdateDir.empty())
+    {
+      int tempDirSize = WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, NULL, 0, NULL, NULL);
+      std::string tempDirStr(tempDirSize, 0);
+      WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, &tempDirStr[0], tempDirSize, NULL, NULL);
+      tempDirStr.pop_back(); // Remove null terminator
+      
+      size_t lastSlash = tempDirStr.find_last_of("\\/");
+      if (lastSlash != std::string::npos)
+      {
+        std::string parentTempDir = tempDirStr.substr(0, lastSlash);
+        cleanupTempDir = "rmdir /S /Q \"" + parentTempDir + "\"\n";
+      }
+    }
+
     const std::string batScript =
         "@echo off\n"
         "chcp 65001 > NUL\n"
-        // "echo Updating the application...\n"
         "timeout /t 2 /nobreak > NUL\n"
-        // "echo Copying files...\n"
         "xcopy /E /I /Y \"" +
-        updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n"
-                                                 "rmdir /S /Q \"" +
-        updateDirStr + "\"\n" +
-        // "echo Files copied.\n"
+        updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
+    
+    std::string finalScript = batScript;
+    
+    if (!tempUpdateDir.empty())
+    {
+      finalScript += cleanupTempDir;
+    }
+    else
+    {
+      finalScript += "rmdir /S /Q \"" + updateDirStr + "\"\n";
+    }
+    
+    finalScript +=
         "timeout /t 1 /nobreak > NUL\n"
         "start \"\" \"" +
         exePathStr + "\"\n"
                      "timeout /t 1 /nobreak > NUL\n"
-                     // "echo Deleting temporary files...\n"
                      "del update_script.bat\n"
-                     "\"\n"
                      "exit\n";
 
     std::ofstream batFile("update_script.bat");
-    batFile << batScript;
+    batFile << finalScript;
     batFile.close();
     std::cout << "Temporary .bat created.\n";
   }
@@ -257,12 +323,18 @@ namespace desktop_updater
 
     printf("Executable path: %ls\n", executable_path);
 
-    // Replace the existing copyDirectory lambda with copyAndReplaceFiles function
-    std::wstring updateDir = L"update";
+    // Try to find temp update directory first
+    std::wstring tempUpdateDir = FindTempUpdateDirectory();
+    std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
     std::wstring destDir = L".";
 
+    if (!tempUpdateDir.empty())
+    {
+      printf("Found temp update directory: %ls\n", tempUpdateDir.c_str());
+    }
+
     // Update createBatFile call with parameters
-    createBatFile(updateDir, destDir, executable_path);
+    createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
     // 3. .bat dosyasını çalıştır
     runBatFile();

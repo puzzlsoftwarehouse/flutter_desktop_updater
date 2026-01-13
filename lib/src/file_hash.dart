@@ -5,6 +5,7 @@ import "dart:io";
 import "package:cryptography_plus/cryptography_plus.dart";
 import "package:desktop_updater/desktop_updater.dart";
 import "package:desktop_updater/src/app_archive.dart";
+import "package:flutter/material.dart";
 
 Future<String> getFileHash(File file) async {
   try {
@@ -18,7 +19,7 @@ Future<String> getFileHash(File file) async {
     // Hash'i utf-8 base64'e dönüştürün ve geri döndürün
     return base64.encode(hash.bytes);
   } catch (e) {
-    print("Error reading file ${file.path}: $e");
+    debugPrint("Error reading file ${file.path}: $e");
     return "";
   }
 }

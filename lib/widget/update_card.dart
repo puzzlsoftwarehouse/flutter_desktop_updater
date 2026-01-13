@@ -5,10 +5,10 @@ class UpdateCard extends StatefulWidget {
   const UpdateCard({super.key});
 
   @override
-  _UpdateCardState createState() => _UpdateCardState();
+  UpdateCardState createState() => UpdateCardState();
 }
 
-class _UpdateCardState extends State<UpdateCard> {
+class UpdateCardState extends State<UpdateCard> {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(

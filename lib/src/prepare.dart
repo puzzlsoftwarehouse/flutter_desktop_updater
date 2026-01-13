@@ -3,6 +3,7 @@ import "dart:io";
 import "package:desktop_updater/desktop_updater.dart";
 import "package:desktop_updater/src/app_archive.dart";
 import "package:desktop_updater/src/file_hash.dart";
+import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 Future<List<FileHashModel?>> prepareUpdateAppFunction({
@@ -47,12 +48,12 @@ Future<List<FileHashModel?>> prepareUpdateAppFunction({
     // Close the file
     await sink.close();
 
-    print("Hashes file downloaded to ${outputFile.path}");
+    debugPrint("Hashes file downloaded to ${outputFile.path}");
 
     final oldHashFilePath = await genFileHashes();
     final newHashFilePath = outputFile.path;
 
-    print("Old hashes file: $oldHashFilePath");
+    debugPrint("Old hashes file: $oldHashFilePath");
 
     final changes = await verifyFileHashes(
       oldHashFilePath,

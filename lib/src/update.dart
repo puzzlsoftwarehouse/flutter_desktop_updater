@@ -3,6 +3,41 @@ import "dart:io";
 
 import "package:desktop_updater/desktop_updater.dart";
 import "package:desktop_updater/src/download.dart";
+import "package:flutter/material.dart";
+import "package:path/path.dart" as path;
+
+Future<bool> _canWriteToDirectory(Directory dir) async {
+  try {
+    final testFile = File(path.join(dir.path, ".write_test"));
+    await testFile.writeAsString("test");
+    await testFile.delete();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+Future<String> _getDownloadPath(Directory targetDir) async {
+  if (Platform.isWindows) {
+    final targetPath = targetDir.path.toLowerCase();
+    final isProgramFiles = targetPath.contains("program files") ||
+        targetPath.contains("program files (x86)");
+
+    if (isProgramFiles || !await _canWriteToDirectory(targetDir)) {
+      final tempDir =
+          await Directory.systemTemp.createTemp("desktop_updater_download");
+      return tempDir.path;
+    }
+  }
+
+  if (!await _canWriteToDirectory(targetDir)) {
+    final tempDir =
+        await Directory.systemTemp.createTemp("desktop_updater_download");
+    return tempDir.path;
+  }
+
+  return targetDir.path;
+}
 
 /// Modified updateAppFunction to return a stream of UpdateProgress.
 /// The stream emits total kilobytes, received kilobytes, and the currently downloading file's name.
@@ -28,9 +63,16 @@ Future<Stream<UpdateProgress>> updateAppFunction({
   try {
     if (await dir.exists()) {
       if (changes.isEmpty) {
-        print("No updates required.");
+        debugPrint("No updates required.");
         await responseStream.close();
         return responseStream.stream;
+      }
+
+      final downloadPath = await _getDownloadPath(dir);
+      final useTemp = downloadPath != dir.path;
+
+      if (useTemp) {
+        debugPrint("Usando pasta temp para download: $downloadPath");
       }
 
       var receivedBytes = 0.0;
@@ -52,7 +94,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
             downloadFile(
               remoteUpdateFolder,
               file.filePath,
-              dir.path,
+              downloadPath,
               (received, total) {
                 receivedBytes += received;
                 responseStream.add(
@@ -77,7 +119,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                   completedFiles: completedFiles,
                 ),
               );
-              print("Completed: ${file.filePath}");
+              debugPrint("Completed: ${file.filePath}");
             }).catchError((error) {
               responseStream.addError(error);
               return null;

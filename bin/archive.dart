@@ -3,6 +3,7 @@ import "dart:io";
 
 import "package:cryptography_plus/cryptography_plus.dart";
 import "package:desktop_updater/src/app_archive.dart";
+import "package:flutter/material.dart";
 
 import "helper/copy.dart";
 
@@ -18,13 +19,13 @@ Future<String> getFileHash(File file) async {
     // Hash'i utf-8 base64'e dönüştürün ve geri döndürün
     return base64.encode(hash.bytes);
   } catch (e) {
-    print("Error reading file ${file.path}: $e");
+    debugPrint("Error reading file ${file.path}: $e");
     return "";
   }
 }
 
 Future<String?> genFileHashes({required String? path}) async {
-  print("Generating file hashes for $path");
+  debugPrint("Generating file hashes for $path");
 
   if (path == null) {
     throw Exception("Desktop Updater: Executable path is null");
@@ -32,7 +33,7 @@ Future<String?> genFileHashes({required String? path}) async {
 
   final dir = Directory(path);
 
-  print("Directory path: ${dir.path}");
+  debugPrint("Directory path: ${dir.path}");
 
   // Eğer belirtilen yol bir dizinse
   if (await dir.exists()) {
@@ -83,14 +84,14 @@ Future<String?> genFileHashes({required String? path}) async {
 
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
-    print("PLATFORM must be specified: macos, windows, linux");
+    debugPrint("PLATFORM must be specified: macos, windows, linux");
     exit(1);
   }
 
   final platform = args[0];
 
   if (platform != "macos" && platform != "windows" && platform != "linux") {
-    print("PLATFORM must be specified: macos, windows, linux");
+    debugPrint("PLATFORM must be specified: macos, windows, linux");
     exit(1);
   }
 
@@ -98,7 +99,7 @@ Future<void> main(List<String> args) async {
   final distDir = Directory("dist");
 
   if (!await distDir.exists()) {
-    print("dist folder could not be found");
+    debugPrint("dist folder could not be found");
     exit(1);
   }
 
@@ -137,10 +138,10 @@ Future<void> main(List<String> args) async {
   }
 
   if (!platformFound || foundDirectory == null) {
-    print("File not found for platform: $platform");
+    debugPrint("File not found for platform: $platform");
     exit(1);
   } else {
-    print("Using archive: $foundDirectory");
+    debugPrint("Using archive: $foundDirectory");
   }
 
   /// Check if the file is a zip file
