@@ -1,20 +1,19 @@
 import "dart:convert";
 import "dart:io";
 
-import "package:flutter/material.dart";
 import "package:path/path.dart" as path;
 import "package:pubspec_parse/pubspec_parse.dart";
 
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
-    debugPrint("PLATFORM must be specified: macos, windows, linux");
+    print("PLATFORM must be specified: macos, windows, linux");
     exit(1);
   }
 
   final platform = args[0];
 
   if (platform != "macos" && platform != "windows" && platform != "linux") {
-    debugPrint("PLATFORM must be specified: macos, windows, linux");
+    print("PLATFORM must be specified: macos, windows, linux");
     exit(1);
   }
 
@@ -26,7 +25,7 @@ Future<void> main(List<String> args) async {
       "${parsed.version?.major}.${parsed.version?.minor}.${parsed.version?.patch}";
   final buildNumber = parsed.version?.build.firstOrNull.toString();
 
-  debugPrint(
+  print(
     "Building version $buildName+$buildNumber for $platform for app ${parsed.name}",
   );
 
@@ -36,12 +35,12 @@ Future<void> main(List<String> args) async {
   final flutterPath = Platform.environment["FLUTTER_ROOT"];
 
   if (flutterPath == null || flutterPath.isEmpty) {
-    debugPrint("FLUTTER_ROOT environment variable is not set");
+    print("FLUTTER_ROOT environment variable is not set");
     exit(1);
   }
 
   // Print current working directory
-  debugPrint("Current working directory: ${Directory.current.path}");
+  print("Current working directory: ${Directory.current.path}");
 
   // Determine the Flutter executable based on the platform
   var flutterExecutable = "flutter";
@@ -52,7 +51,7 @@ Future<void> main(List<String> args) async {
   final flutterBinPath = path.join(flutterPath, "bin", flutterExecutable);
 
   if (!File(flutterBinPath).existsSync()) {
-    debugPrint("Flutter executable not found at path: $flutterBinPath");
+    print("Flutter executable not found at path: $flutterBinPath");
     exit(1);
   }
 
@@ -66,13 +65,13 @@ Future<void> main(List<String> args) async {
     "FLUTTER_BUILD_NUMBER=$buildNumber",
   ];
 
-  debugPrint("Executing build command: ${buildCommand.join(' ')}");
+  print("Executing build command: ${buildCommand.join(' ')}");
 
   // Replace Process.run with Process.start to handle real-time output
   final process =
       await Process.start(buildCommand.first, buildCommand.sublist(1));
 
-  process.stdout.transform(utf8.decoder).listen(debugPrint);
+  process.stdout.transform(utf8.decoder).listen(print);
   process.stderr.transform(utf8.decoder).listen((data) {
     stderr.writeln(data);
   });
@@ -83,7 +82,7 @@ Future<void> main(List<String> args) async {
     exit(1);
   }
 
-  debugPrint("Build completed successfully");
+  print("Build completed successfully");
 
   late Directory buildDir;
 
@@ -110,7 +109,7 @@ Future<void> main(List<String> args) async {
   }
 
   if (!buildDir.existsSync()) {
-    debugPrint("Build directory not found: ${buildDir.path}");
+    print("Build directory not found: ${buildDir.path}");
     exit(1);
   }
 
@@ -141,7 +140,7 @@ Future<void> main(List<String> args) async {
   // Copy buildDir to distPath
   await copyDirectory(buildDir, Directory(distPath));
 
-  debugPrint("Archive created at $distPath");
+  print("Archive created at $distPath");
 }
 
 // Helper function to copy directories recursively
