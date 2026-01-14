@@ -11,6 +11,7 @@ Future<void> main(List<String> args) async {
   }
 
   final platform = args[0];
+  final extraArgs = args.length > 1 ? args.sublist(1) : [];
 
   if (platform != "macos" && platform != "windows" && platform != "linux") {
     print("PLATFORM must be specified: macos, windows, linux");
@@ -55,7 +56,7 @@ Future<void> main(List<String> args) async {
     exit(1);
   }
 
-  final buildCommand = [
+  final buildCommand = <String>[
     flutterBinPath,
     "build",
     platform,
@@ -63,6 +64,7 @@ Future<void> main(List<String> args) async {
     "FLUTTER_BUILD_NAME=$buildName",
     "--dart-define",
     "FLUTTER_BUILD_NUMBER=$buildNumber",
+    ...extraArgs,
   ];
 
   print("Executing build command: ${buildCommand.join(' ')}");
