@@ -90,9 +90,13 @@ Future<Stream<UpdateProgress>> updateAppFunction({
       final downloadResults = <Map<String, dynamic>>[];
       final updateFolder = Directory(path.join(dir.path, "update"));
 
+      // Track progress per file to avoid double-counting
+      // Maps file path to last reported received bytes for that file
+      final fileProgress = <String, double>{};
+
       // Limit concurrent downloads to avoid "Too many open files" error and DNS overload
       // Reduced to 5 to prevent DNS lookup failures when too many connections are opened simultaneously
-      const maxConcurrentDownloads = 5;
+      const maxConcurrentDownloads = 20;
       final activeDownloads = <Completer<void>>[];
       final downloadQueue = <FileHashModel>[];
 
@@ -210,13 +214,27 @@ Future<Stream<UpdateProgress>> updateAppFunction({
               final completer = Completer<void>();
               activeDownloads.add(completer);
 
+              // Initialize progress tracking for this file
+              fileProgress[file.filePath] = 0.0;
+
               // Start the download
               downloadFile(
                 remoteUpdateFolder,
                 file.filePath,
                 downloadPath,
                 (received, total) {
-                  receivedBytes += received;
+                  // Get the last reported progress for this file
+                  final lastReceived = fileProgress[file.filePath] ?? 0.0;
+
+                  // Calculate the increment (difference from last report)
+                  final increment = received - lastReceived;
+
+                  // Only add the increment to avoid double-counting
+                  if (increment > 0) {
+                    receivedBytes += increment;
+                    fileProgress[file.filePath] = received;
+                  }
+
                   responseStream.add(
                     UpdateProgress(
                       totalBytes: totalLengthKB,
@@ -230,6 +248,18 @@ Future<Stream<UpdateProgress>> updateAppFunction({
               ).then((_) async {
                 try {
                   completedFiles += 1;
+
+                  // Ensure the file's full size is counted when completed
+                  final fileSizeKB = file.length / 1024.0;
+                  final lastReported = fileProgress[file.filePath] ?? 0.0;
+                  final remaining = fileSizeKB - lastReported;
+
+                  // Add any remaining bytes that weren't reported in the last callback
+                  if (remaining > 0) {
+                    receivedBytes += remaining;
+                    fileProgress[file.filePath] = fileSizeKB;
+                  }
+
                   final endTime = DateTime.now();
                   final duration = endTime.difference(startTime);
 
@@ -284,11 +314,13 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                 final errorString = error.toString();
                 int retryAttempts = 3; // Default max retries
                 bool hasRetryInfo = false;
-                
+
                 if (errorString.contains('Retry attempts:')) {
-                  final retryMatch = RegExp(r'Retry attempts: (\d+)').firstMatch(errorString);
+                  final retryMatch =
+                      RegExp(r'Retry attempts: (\d+)').firstMatch(errorString);
                   if (retryMatch != null) {
-                    retryAttempts = int.tryParse(retryMatch.group(1) ?? '3') ?? 3;
+                    retryAttempts =
+                        int.tryParse(retryMatch.group(1) ?? '3') ?? 3;
                     hasRetryInfo = true;
                   }
                 }
