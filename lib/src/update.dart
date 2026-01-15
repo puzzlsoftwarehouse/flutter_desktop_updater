@@ -620,19 +620,7 @@ Future<String?> _getBundleIdFromInfoPlist() async {
       }
     }
   } catch (e) {
-    print("Warning: Could not read Info.plist, using fallback: $e");
-  }
-
-  final executablePath = Platform.resolvedExecutable;
-  final match = RegExp(r'/([^/]+)\.app/Contents/').firstMatch(executablePath);
-  if (match != null) {
-    final appName = match.group(1);
-    final possibleIds = [
-      "com.puzzl.$appName",
-      "com.$appName",
-      "$appName",
-    ];
-    return possibleIds.first;
+    print("Warning: Could not read Info.plist: $e");
   }
 
   return null;
@@ -674,7 +662,6 @@ Future<void> _writeDirectoryTree(
   try {
     final entries = dir.listSync();
     entries.sort((a, b) {
-      // Directories first, then files
       if (a is Directory && b is File) return -1;
       if (a is File && b is Directory) return 1;
       return a.path.compareTo(b.path);
