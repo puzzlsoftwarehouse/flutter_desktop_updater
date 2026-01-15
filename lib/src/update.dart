@@ -79,46 +79,34 @@ Future<Stream<UpdateProgress>> updateAppFunction({
       final totalFiles = changes.length;
       var completedFiles = 0;
 
-      // Calculate total length in KB
       final totalLengthKB = changes.fold<double>(
         0,
         (previousValue, element) =>
             previousValue + ((element?.length ?? 0) / 1024.0),
       );
 
-      // Track download results
       final downloadResults = <Map<String, dynamic>>[];
       final updateFolder = Directory(path.join(dir.path, "update"));
 
-      // Track progress per file to avoid double-counting
-      // Maps file path to last reported received bytes for that file
       final fileProgress = <String, double>{};
 
-      // Limit concurrent downloads to avoid "Too many open files" error and DNS overload
-      // Reduced to 5 to prevent DNS lookup failures when too many connections are opened simultaneously
       const maxConcurrentDownloads = 20;
       final activeDownloads = <Completer<void>>[];
       final downloadQueue = <FileHashModel>[];
 
-      // Add all files to the download queue
       for (final file in changes) {
         if (file != null) {
           downloadQueue.add(file);
         }
       }
-
-      // Process downloads with concurrency control
       unawaited(
         () async {
           print(
               "Starting download process: ${downloadQueue.length} files in queue");
-
-          // Setup periodic log saving (every 10 seconds)
           Directory? logDir;
           String? logFileName;
           Timer? periodicLogTimer;
 
-          // Determine log directory
           if (Platform.isMacOS) {
             final appSupportDir = Platform.environment['HOME'];
             if (appSupportDir != null) {
@@ -149,23 +137,21 @@ Future<Stream<UpdateProgress>> updateAppFunction({
           // Create initial log file
           try {
             final logFile = File(path.join(logDir.path, logFileName));
-            final initialSink = logFile.openWrite();
-            initialSink.writeln("=" * 80);
-            initialSink
-                .writeln("DOWNLOAD LOG - ${timestamp.toIso8601String()}");
-            initialSink.writeln("=" * 80);
-            initialSink.writeln("");
-            initialSink.writeln("INITIAL STATUS:");
-            initialSink.writeln("  Remote folder: $remoteUpdateFolder");
-            initialSink.writeln("  Update folder: ${updateFolder.path}");
-            initialSink.writeln("  Total files: $totalFiles");
-            initialSink.writeln(
-                "  Total size: ${_formatBytes((totalLengthKB * 1024).toInt())}");
-            initialSink.writeln("  Started at: ${timestamp.toIso8601String()}");
-            initialSink.writeln("");
-            initialSink.writeln(
-                "Periodic updates will be appended every 10 seconds...");
-            initialSink.writeln("");
+            final initialSink = logFile.openWrite()
+              ..writeln("=" * 80)
+              ..writeln("DOWNLOAD LOG - ${timestamp.toIso8601String()}")
+              ..writeln("=" * 80)
+              ..writeln("")
+              ..writeln("INITIAL STATUS:")
+              ..writeln("  Remote folder: $remoteUpdateFolder")
+              ..writeln("  Update folder: ${updateFolder.path}")
+              ..writeln("  Total files: $totalFiles")
+              ..writeln(
+                  "  Total size: ${_formatBytes((totalLengthKB * 1024).toInt())}")
+              ..writeln("  Started at: ${timestamp.toIso8601String()}")
+              ..writeln("")
+              ..writeln("Periodic updates will be appended every 10 seconds...")
+              ..writeln("");
             await initialSink.close();
             print("Download log initialized: ${logFile.path}");
           } catch (e) {
@@ -196,40 +182,30 @@ Future<Stream<UpdateProgress>> updateAppFunction({
           });
 
           while (downloadQueue.isNotEmpty || activeDownloads.isNotEmpty) {
-            // Start new downloads if we have capacity
             while (activeDownloads.length < maxConcurrentDownloads &&
                 downloadQueue.isNotEmpty) {
               final file = downloadQueue.removeAt(0);
               print(
                   "Starting download: ${file.filePath} (${activeDownloads.length + 1}/$maxConcurrentDownloads active)");
 
-              // Small delay between starting downloads to avoid DNS overload
               if (activeDownloads.isNotEmpty) {
                 await Future.delayed(Duration(milliseconds: 100));
               }
 
               final startTime = DateTime.now();
 
-              // Create a completer to track this download
               final completer = Completer<void>();
               activeDownloads.add(completer);
 
-              // Initialize progress tracking for this file
               fileProgress[file.filePath] = 0.0;
 
-              // Start the download
               downloadFile(
                 remoteUpdateFolder,
                 file.filePath,
                 downloadPath,
                 (received, total) {
-                  // Get the last reported progress for this file
                   final lastReceived = fileProgress[file.filePath] ?? 0.0;
-
-                  // Calculate the increment (difference from last report)
                   final increment = received - lastReceived;
-
-                  // Only add the increment to avoid double-counting
                   if (increment > 0) {
                     receivedBytes += increment;
                     fileProgress[file.filePath] = received;
@@ -249,12 +225,10 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                 try {
                   completedFiles += 1;
 
-                  // Ensure the file's full size is counted when completed
                   final fileSizeKB = file.length / 1024.0;
                   final lastReported = fileProgress[file.filePath] ?? 0.0;
                   final remaining = fileSizeKB - lastReported;
 
-                  // Add any remaining bytes that weren't reported in the last callback
                   if (remaining > 0) {
                     receivedBytes += remaining;
                     fileProgress[file.filePath] = fileSizeKB;
@@ -263,7 +237,6 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                   final endTime = DateTime.now();
                   final duration = endTime.difference(startTime);
 
-                  // Get file info
                   final fullPath = path.join(updateFolder.path, file.filePath);
                   final downloadedFile = File(fullPath);
                   int fileSize = 0;
@@ -300,7 +273,6 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                   );
                   debugPrint("Completed: ${file.filePath}");
                 } finally {
-                  // Always remove completer and complete it, even if there was an error
                   activeDownloads.remove(completer);
                   if (!completer.isCompleted) {
                     completer.complete();
@@ -310,9 +282,8 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                 final endTime = DateTime.now();
                 final duration = endTime.difference(startTime);
 
-                // Extract retry information from error message
                 final errorString = error.toString();
-                int retryAttempts = 3; // Default max retries
+                int retryAttempts = 3;
                 bool hasRetryInfo = false;
 
                 if (errorString.contains('Retry attempts:')) {
@@ -350,7 +321,6 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                   stackTrace,
                 );
 
-                // Remove completer and complete it
                 activeDownloads.remove(completer);
                 if (!completer.isCompleted) {
                   completer.complete();
@@ -358,9 +328,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
               });
             }
 
-            // Wait for at least one download to complete before starting new ones
             if (activeDownloads.isNotEmpty) {
-              // Create a copy of the list to avoid modification during iteration
               final futures = activeDownloads.map((c) => c.future).toList();
               if (futures.isNotEmpty) {
                 print(
@@ -369,25 +337,19 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                 print(
                     "At least one download completed. Active: ${activeDownloads.length}, Queue: ${downloadQueue.length}");
               }
-              // Small delay to prevent tight loop and allow UI to update
               await Future.delayed(Duration(milliseconds: 10));
             } else if (downloadQueue.isNotEmpty) {
-              // If queue is not empty but no active downloads, something might be wrong
-              // But continue anyway with a small delay
               print(
                   "Warning: Queue not empty but no active downloads. Queue: ${downloadQueue.length}");
               await Future.delayed(Duration(milliseconds: 50));
             } else {
-              // All done, exit loop
               print("All downloads completed!");
               break;
             }
           }
 
-          // Cancel periodic log timer
           periodicLogTimer.cancel();
 
-          // Generate and save final download log
           await _saveDownloadLog(
             updateFolder: updateFolder,
             downloadResults: downloadResults,
@@ -438,7 +400,6 @@ Future<void> _saveDownloadLogPeriodic({
     final timestamp = DateTime.now();
     final logFile = File(path.join(logDir.path, logFileName));
 
-    // Open in append mode to add periodic updates
     final sink = logFile.openWrite(mode: FileMode.append);
 
     sink.writeln("");
@@ -447,7 +408,6 @@ Future<void> _saveDownloadLogPeriodic({
     sink.writeln("=" * 80);
     sink.writeln("");
 
-    // Calculate current statistics
     final successful =
         downloadResults.where((r) => r["status"] == "success").length;
     final failed = downloadResults.where((r) => r["status"] == "failed").length;
@@ -472,7 +432,6 @@ Future<void> _saveDownloadLogPeriodic({
     sink.writeln("  Downloaded size: ${_formatBytes(totalSize)}");
     sink.writeln("");
 
-    // Show recent failures (last 10)
     final recentFailures = downloadResults
         .where((r) => r["status"] == "failed")
         .toList()
@@ -520,12 +479,10 @@ Future<void> _saveDownloadLog({
     final timestamp = DateTime.now();
     final logFileName = "download_${timestamp.millisecondsSinceEpoch}.log";
 
-    // Determine log directory based on platform
     Directory? logDir;
     if (Platform.isMacOS) {
       final appSupportDir = Platform.environment['HOME'];
       if (appSupportDir != null) {
-        // Try to get bundle identifier from Info.plist
         final bundleId = await _getBundleIdFromInfoPlist();
         if (bundleId != null) {
           logDir = Directory(
@@ -537,7 +494,6 @@ Future<void> _saveDownloadLog({
               "logs",
             ),
           );
-          // Create log directory if it doesn't exist
           if (!await logDir.exists()) {
             await logDir.create(recursive: true);
           }
@@ -545,7 +501,6 @@ Future<void> _saveDownloadLog({
       }
     }
 
-    // Fallback to update folder if no log directory found
     if (logDir == null || !await logDir.exists()) {
       logDir = updateFolder;
     }
@@ -570,7 +525,6 @@ Future<void> _saveDownloadLog({
       (sum, r) => sum + (r["duration"] as int? ?? 0),
     );
 
-    // Write log header
     sink.writeln("=" * 80);
     sink.writeln("DOWNLOAD LOG - ${timestamp.toIso8601String()}");
     sink.writeln("=" * 80);
@@ -591,13 +545,11 @@ Future<void> _saveDownloadLog({
     }
     sink.writeln("");
 
-    // Write detailed file information
     sink.writeln("=" * 80);
     sink.writeln("DETAILED FILE INFORMATION");
     sink.writeln("=" * 80);
     sink.writeln("");
 
-    // Group by status
     final successfulFiles =
         downloadResults.where((r) => r["status"] == "success").toList();
     final failedFiles =
@@ -670,7 +622,6 @@ Future<void> _saveDownloadLog({
 
     await sink.close();
 
-    // Print summary to console (minimal)
     print("Download log saved to: ${logFile.path}");
     print(
         "Summary: $successful/$totalFiles successful, ${_formatBytes(totalSize)} downloaded");
@@ -690,8 +641,6 @@ Future<String?> _getBundleIdFromInfoPlist() async {
 
   try {
     final executablePath = Platform.resolvedExecutable;
-    // Extract bundle path from executable path
-    // /Applications/app.app/Contents/MacOS/app -> /Applications/app.app
     final bundleMatch =
         RegExp(r'^(.+\.app)/Contents/').firstMatch(executablePath);
     if (bundleMatch != null) {
@@ -700,11 +649,7 @@ Future<String?> _getBundleIdFromInfoPlist() async {
 
       final infoPlistFile = File(infoPlistPath);
       if (await infoPlistFile.exists()) {
-        // Read and parse Info.plist
         final content = await infoPlistFile.readAsString();
-
-        // Simple XML parsing for CFBundleIdentifier
-        // Look for <key>CFBundleIdentifier</key> followed by <string>value</string>
         final bundleIdMatch = RegExp(
           r'<key>CFBundleIdentifier</key>\s*<string>([^<]+)</string>',
           caseSensitive: false,
@@ -716,22 +661,18 @@ Future<String?> _getBundleIdFromInfoPlist() async {
       }
     }
   } catch (e) {
-    // If we can't read Info.plist, fall back to extraction from path
     print("Warning: Could not read Info.plist, using fallback: $e");
   }
 
-  // Fallback: try to extract from executable path
   final executablePath = Platform.resolvedExecutable;
   final match = RegExp(r'/([^/]+)\.app/Contents/').firstMatch(executablePath);
   if (match != null) {
     final appName = match.group(1);
-    // Try common bundle ID patterns
     final possibleIds = [
       "com.puzzl.$appName",
       "com.$appName",
       "$appName",
     ];
-    // Return first one that might work (we'll let the system handle if it doesn't exist)
     return possibleIds.first;
   }
 
