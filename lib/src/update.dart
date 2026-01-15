@@ -201,7 +201,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
 
               // Small delay between starting downloads to avoid DNS overload
               if (activeDownloads.isNotEmpty) {
-                await Future.delayed(Duration(milliseconds: 500));
+                await Future.delayed(Duration(milliseconds: 100));
               }
 
               final startTime = DateTime.now();
@@ -280,6 +280,19 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                 final endTime = DateTime.now();
                 final duration = endTime.difference(startTime);
 
+                // Extract retry information from error message
+                final errorString = error.toString();
+                int retryAttempts = 3; // Default max retries
+                bool hasRetryInfo = false;
+                
+                if (errorString.contains('Retry attempts:')) {
+                  final retryMatch = RegExp(r'Retry attempts: (\d+)').firstMatch(errorString);
+                  if (retryMatch != null) {
+                    retryAttempts = int.tryParse(retryMatch.group(1) ?? '3') ?? 3;
+                    hasRetryInfo = true;
+                  }
+                }
+
                 downloadResults.add({
                   "file": file.filePath,
                   "status": "failed",
@@ -290,6 +303,8 @@ Future<Stream<UpdateProgress>> updateAppFunction({
                   "endTime": endTime.toIso8601String(),
                   "error": error.toString(),
                   "exists": false,
+                  "retryAttempts": retryAttempts,
+                  "hadRetries": hasRetryInfo,
                 });
 
                 print("ERROR: Failed to download file: ${file.filePath}");
@@ -439,7 +454,12 @@ Future<void> _saveDownloadLogPeriodic({
       for (final result in recentFailures) {
         final file = result["file"] as String;
         final error = result["error"] as String? ?? "Unknown error";
+        final retryAttempts = result["retryAttempts"] as int? ?? 0;
+        final hadRetries = result["hadRetries"] as bool? ?? false;
         sink.writeln("  File: $file");
+        if (hadRetries && retryAttempts > 0) {
+          sink.writeln("    Retry attempts: $retryAttempts (all failed)");
+        }
         sink.writeln(
             "    Error: ${error.split('\n').first}"); // First line only
         sink.writeln("");
@@ -584,11 +604,16 @@ Future<void> _saveDownloadLog({
         final error = result["error"] as String? ?? "Unknown error";
         final startTime = result["startTime"] as String;
         final endTime = result["endTime"] as String;
+        final retryAttempts = result["retryAttempts"] as int? ?? 0;
+        final hadRetries = result["hadRetries"] as bool? ?? false;
 
         sink.writeln("  File: $file");
         sink.writeln("    Status: FAILED ✗");
         sink.writeln("    Expected size: ${_formatBytes(expectedSize)}");
         sink.writeln("    Duration: ${_formatDuration(duration)}");
+        if (hadRetries && retryAttempts > 0) {
+          sink.writeln("    Retry attempts: $retryAttempts (all failed)");
+        }
         sink.writeln("    Start: $startTime");
         sink.writeln("    End: $endTime");
         sink.writeln("    Error: $error");
