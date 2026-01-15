@@ -572,17 +572,24 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             log_message "Re-signing frameworks and bundle after copy..."
             
             # Get the signing identity from the original bundle
-            # Extract Authority from codesign output
-            ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | awk '{print $1}' || echo "")
+            # Extract Authority from codesign output - get the full identity, not just first word
+            ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
                 # Try alternative method: get from verbose output
-                ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | awk '{print $1}' || echo "")
+                ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             fi
             
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] && [ -n "$ORIGINAL_TEAM_ID" ]; then
-                # Last resort: try to find identity by Team ID
+                # Last resort: try to find identity by Team ID - get the full identity in quotes
                 ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
+            fi
+            
+            # If still empty or just "Apple", try to get the first valid identity with the Team ID
+            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] || [ "$ORIGINAL_SIGNING_IDENTITY" = "Apple" ]; then
+                if [ -n "$ORIGINAL_TEAM_ID" ]; then
+                    ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
+                fi
             fi
             
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
