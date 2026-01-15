@@ -1,12 +1,34 @@
 import "dart:async";
 import "dart:io";
 
-import "package:http/http.dart" as http;
+import "package:dio/dio.dart";
 import "package:path/path.dart" as path;
+
+// Shared Dio instance for connection pooling and DNS caching
+Dio? _sharedDio;
+
+/// Gets or creates a shared Dio instance for connection pooling
+/// This reuses connections and caches DNS lookups automatically
+Dio _getSharedDio() {
+  if (_sharedDio != null) {
+    return _sharedDio!;
+  }
+
+  _sharedDio = Dio(BaseOptions(
+    connectTimeout: Duration(seconds: 30),
+    receiveTimeout: Duration(minutes: 10),
+    sendTimeout: Duration(seconds: 30),
+    // Enable connection pooling (default in Dio)
+    followRedirects: true,
+    maxRedirects: 5,
+  ));
+
+  return _sharedDio!;
+}
 
 /// Modified downloadFile to report progress based on HTTP reception only.
 /// [progressCallback] receives two doubles: receivedKB and totalKB.
-/// Implements retry logic for network errors.
+/// Uses Dio with automatic connection pooling and DNS caching.
 Future<void> downloadFile(
   String? host,
   String filePath,
@@ -14,6 +36,33 @@ Future<void> downloadFile(
   void Function(double receivedKB, double totalKB)? progressCallback,
 ) async {
   if (host == null) return;
+
+  // Create full save path including directories
+  final fullSavePath = path.join("$savePath/update", filePath);
+  final saveDirectory = Directory(path.dirname(fullSavePath));
+
+  // Create all necessary directories
+  if (!saveDirectory.existsSync()) {
+    try {
+      await saveDirectory.create(recursive: true);
+      print("Created directory: ${saveDirectory.path}");
+    } catch (e) {
+      throw Exception("Failed to create directory for file download:\n"
+          "  Directory path: ${saveDirectory.path}\n"
+          "  File path: $filePath\n"
+          "  Error: $e");
+    }
+  }
+
+  // Check if directory is writable
+  if (!await saveDirectory.exists()) {
+    throw Exception("Directory does not exist after creation attempt:\n"
+        "  Directory path: ${saveDirectory.path}\n"
+        "  File path: $filePath");
+  }
+
+  final url = "$host/$filePath";
+  final dio = _getSharedDio();
 
   const maxRetries = 3;
   const retryDelays = [
@@ -25,7 +74,6 @@ Future<void> downloadFile(
   Exception? lastError;
 
   for (int attempt = 0; attempt < maxRetries; attempt++) {
-    http.Client? client;
     try {
       // Add small delay between retries (except first attempt)
       if (attempt > 0) {
@@ -34,145 +82,112 @@ Future<void> downloadFile(
             "Retrying download (attempt ${attempt + 1}/$maxRetries): $filePath");
       }
 
-      client = http.Client();
-      final url = "$host/$filePath";
-      final request = http.Request("GET", Uri.parse(url));
-      final response = await client.send(request);
+      // Use Dio's download method with progress callback
+      await dio.download(
+        url,
+        fullSavePath,
+        onReceiveProgress: (received, total) {
+          if (progressCallback != null && total > 0) {
+            final receivedKB = received / 1024;
+            final totalKB = total / 1024;
+            progressCallback(receivedKB, totalKB);
+          }
+        },
+        options: Options(
+          receiveTimeout: Duration(minutes: 10),
+          validateStatus: (status) => status != null && status >= 200 && status < 300,
+        ),
+      );
 
-      if (response.statusCode != 200) {
-        client.close();
-        throw HttpException("Failed to download file: $url\n"
-            "  Status code: ${response.statusCode}\n"
-            "  Reason phrase: ${response.reasonPhrase}\n"
+      print("File downloaded to $fullSavePath");
+      return; // Success!
+    } on DioException catch (e) {
+      // Check if this is a retryable network error
+      final isNetworkError = e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.type == DioExceptionType.connectionError ||
+          (e.error is SocketException) ||
+          (e.message?.toLowerCase().contains('failed host lookup') ?? false) ||
+          (e.message?.toLowerCase().contains('socketexception') ?? false);
+
+      if (isNetworkError && attempt < maxRetries - 1) {
+        lastError = Exception("Network error: ${e.message}");
+        continue; // Retry
+      } else {
+        // Non-network error or max retries reached
+        String errorMessage = "Failed to download file: $url\n"
             "  File path: $filePath\n"
-            "  Save path: $savePath");
-      }
+            "  Save path: $fullSavePath\n";
 
-      // Create full save path including directories
-      final fullSavePath = path.join("$savePath/update", filePath);
-      final saveDirectory = Directory(path.dirname(fullSavePath));
-
-      // Create all necessary directories
-      if (!saveDirectory.existsSync()) {
-        try {
-          await saveDirectory.create(recursive: true);
-          print("Created directory: ${saveDirectory.path}");
-        } catch (e) {
-          client.close();
-          throw Exception("Failed to create directory for file download:\n"
-              "  Directory path: ${saveDirectory.path}\n"
-              "  File path: $filePath\n"
-              "  Error: $e");
+        if (e.response != null) {
+          errorMessage += "  Status code: ${e.response!.statusCode}\n"
+              "  Reason phrase: ${e.response!.statusMessage}\n";
         }
-      }
 
-      // Check if directory is writable
-      if (!await saveDirectory.exists()) {
-        client.close();
-        throw Exception("Directory does not exist after creation attempt:\n"
-            "  Directory path: ${saveDirectory.path}\n"
-            "  File path: $filePath");
-      }
+        if (e.type == DioExceptionType.connectionTimeout ||
+            e.type == DioExceptionType.receiveTimeout ||
+            e.type == DioExceptionType.sendTimeout) {
+          errorMessage += "  Error: Timeout - ${e.message}\n";
+        } else if (e.type == DioExceptionType.connectionError) {
+          errorMessage += "  Error: Connection error - ${e.message}\n";
+        } else {
+          errorMessage += "  Error: ${e.message}\n";
+        }
 
-      // Prepare file for writing
-      final file = File(fullSavePath);
-      final sink = file.openWrite();
-      var received = 0;
-      final contentLength = response.contentLength ?? 0;
-
-      // Listen to the HTTP response stream with timeout protection
-      try {
-        await response.stream
-            .listen(
-              (List<int> chunk) {
-                // Write chunk to file
-                sink.add(chunk);
-
-                // Track received bytes for this file (used for error reporting)
-                received = chunk.length;
-
-                // Report progress
-                if (progressCallback != null && contentLength != 0) {
-                  final receivedKB = received / 1024;
-                  final totalKB = contentLength / 1024;
-                  progressCallback(receivedKB, totalKB);
-                }
-              },
-              onDone: () async {
-                await sink.close();
-                client?.close();
-                print("File downloaded to $fullSavePath");
-              },
-              onError: (e) {
-                sink.close();
-                client?.close();
-                throw Exception("Error while downloading file:\n"
-                    "  URL: $url\n"
-                    "  File path: $filePath\n"
-                    "  Save path: $fullSavePath\n"
-                    "  Received bytes: $received / $contentLength\n"
-                    "  Error: $e");
-              },
-              cancelOnError: true,
-            )
-            .asFuture()
-            .timeout(
-              Duration(minutes: 10), // 10 minute timeout per file
-              onTimeout: () {
-                sink.close();
-                client?.close();
-                throw TimeoutException(
-                  "Download timeout after 10 minutes",
-                  Duration(minutes: 10),
-                );
-              },
-            );
-
-        // Success! Exit retry loop
-        return;
-      } catch (e) {
-        // Ensure resources are cleaned up on error
-        try {
-          sink.close();
-        } catch (_) {}
-        try {
-          client.close();
-        } catch (_) {}
-
-        // Re-throw to be handled by outer catch
-        rethrow;
+        if (attempt == maxRetries - 1) {
+          // Add retry information when all attempts failed
+          final errorWithRetries = Exception(
+            "$errorMessage"
+            "  Retry attempts: $maxRetries\n"
+            "  All attempts failed"
+          );
+          throw errorWithRetries;
+        }
+        lastError = Exception(errorMessage);
       }
     } catch (e) {
-      // Ensure client is closed on error
-      try {
-        client?.close();
-      } catch (_) {}
-
-      // Check if this is a retryable network error
+      // Handle other errors
       final errorString = e.toString().toLowerCase();
       final isNetworkError = errorString.contains('socketexception') ||
           errorString.contains('failed host lookup') ||
           errorString.contains('connection') ||
           errorString.contains('timeout') ||
-          errorString.contains('network') ||
-          errorString.contains('clientexception');
+          errorString.contains('network');
 
       if (isNetworkError && attempt < maxRetries - 1) {
         lastError = e is Exception ? e : Exception(e.toString());
         continue; // Retry
       } else {
-        // Non-network error or max retries reached
         if (attempt == maxRetries - 1) {
-          // Last attempt failed, throw the error
-          throw e is Exception ? e : Exception(e.toString());
+          // Add retry information when all attempts failed
+          final baseError = e is Exception ? e.toString() : e.toString();
+          final errorWithRetries = Exception(
+            "Failed to download file: $url\n"
+            "  File path: $filePath\n"
+            "  Save path: $fullSavePath\n"
+            "  Error: $baseError\n"
+            "  Retry attempts: $maxRetries\n"
+            "  All attempts failed"
+          );
+          throw errorWithRetries;
         }
         lastError = e is Exception ? e : Exception(e.toString());
       }
     }
   }
 
-  // All retries exhausted
-  throw lastError ??
+  // All retries exhausted - include retry information in error
+  final finalError = lastError ??
       Exception(
           "Failed to download file after $maxRetries attempts: $filePath");
+  
+  // Add retry information to error message
+  final errorWithRetries = Exception(
+    "${finalError.toString()}\n"
+    "  Retry attempts: $maxRetries\n"
+    "  All attempts failed"
+  );
+  
+  throw errorWithRetries;
 }
