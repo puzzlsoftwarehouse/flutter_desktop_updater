@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 import "package:dio/dio.dart";
 import "package:path/path.dart" as path;
 
-// Shared Dio instance for connection pooling and DNS caching
 Dio? _sharedDio;
 
 /// Gets or creates a shared Dio instance for connection pooling
@@ -16,10 +15,9 @@ Dio _getSharedDio() {
   }
 
   _sharedDio = Dio(BaseOptions(
-    connectTimeout: Duration(seconds: 30),
-    receiveTimeout: Duration(minutes: 10),
-    sendTimeout: Duration(seconds: 30),
-    // Enable connection pooling (default in Dio)
+    connectTimeout: const Duration(seconds: 30),
+    receiveTimeout: const Duration(minutes: 10),
+    sendTimeout: const Duration(seconds: 30),
     followRedirects: true,
     maxRedirects: 5,
   ));
@@ -38,11 +36,9 @@ Future<void> downloadFile(
 ) async {
   if (host == null) return;
 
-  // Create full save path including directories
   final fullSavePath = path.join("$savePath/update", filePath);
   final saveDirectory = Directory(path.dirname(fullSavePath));
 
-  // Create all necessary directories
   if (!saveDirectory.existsSync()) {
     try {
       await saveDirectory.create(recursive: true);
@@ -55,7 +51,6 @@ Future<void> downloadFile(
     }
   }
 
-  // Check if directory is writable
   if (!await saveDirectory.exists()) {
     throw Exception("Directory does not exist after creation attempt:\n"
         "  Directory path: ${saveDirectory.path}\n"
@@ -76,14 +71,11 @@ Future<void> downloadFile(
 
   for (int attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      // Add small delay between retries (except first attempt)
       if (attempt > 0) {
         await Future.delayed(retryDelays[attempt - 1]);
         print(
             "Retrying download (attempt ${attempt + 1}/$maxRetries): $filePath");
       }
-
-      // Use Dio's download method with progress callback
       await dio.download(
         url,
         fullSavePath,
@@ -102,9 +94,8 @@ Future<void> downloadFile(
       );
 
       debugPrint("File downloaded to $fullSavePath");
-      return; // Success!
+      return;
     } on DioException catch (e) {
-      // Check if this is a retryable network error
       final isNetworkError = e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.receiveTimeout ||
           e.type == DioExceptionType.sendTimeout ||
