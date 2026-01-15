@@ -158,7 +158,8 @@ Future<Stream<UpdateProgress>> updateAppFunction({
 
               fileProgress[file.filePath] = 0.0;
 
-              downloadFile(
+              final downloader = FileDownloader();
+              downloader.downloadFile(
                 remoteUpdateFolder,
                 file.filePath,
                 dir.path,
