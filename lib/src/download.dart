@@ -20,7 +20,11 @@ Future<void> downloadFile(
 
   if (response.statusCode != 200) {
     client.close();
-    throw HttpException("Failed to download file: $url");
+    throw HttpException("Failed to download file: $url\n"
+        "  Status code: ${response.statusCode}\n"
+        "  Reason phrase: ${response.reasonPhrase}\n"
+        "  File path: $filePath\n"
+        "  Save path: $savePath");
   }
 
   // Create full save path including directories
@@ -29,7 +33,22 @@ Future<void> downloadFile(
 
   // Create all necessary directories
   if (!saveDirectory.existsSync()) {
-    await saveDirectory.create(recursive: true);
+    try {
+      await saveDirectory.create(recursive: true);
+      print("Created directory: ${saveDirectory.path}");
+    } catch (e) {
+      throw Exception("Failed to create directory for file download:\n"
+          "  Directory path: ${saveDirectory.path}\n"
+          "  File path: $filePath\n"
+          "  Error: $e");
+    }
+  }
+
+  // Check if directory is writable
+  if (!await saveDirectory.exists()) {
+    throw Exception("Directory does not exist after creation attempt:\n"
+        "  Directory path: ${saveDirectory.path}\n"
+        "  File path: $filePath");
   }
 
   // Prepare file for writing
@@ -62,7 +81,12 @@ Future<void> downloadFile(
     onError: (e) {
       sink.close();
       client.close();
-      throw e;
+      throw Exception("Error while downloading file:\n"
+          "  URL: $url\n"
+          "  File path: $filePath\n"
+          "  Save path: $fullSavePath\n"
+          "  Received bytes: $received / $contentLength\n"
+          "  Error: $e");
     },
     cancelOnError: true,
   ).asFuture();
