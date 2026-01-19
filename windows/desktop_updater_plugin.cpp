@@ -3,8 +3,9 @@
 // This must be included before many other Windows headers.
 #include <windows.h>
 #include <VersionHelpers.h>
-#include <Shlwapi.h> // Include Shlwapi.h for PathFileExistsW
-#include <shellapi.h> // ShellExecuteW for UAC elevation
+#include <Shlwapi.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "Version.lib") // Link with Version.lib
 #pragma comment(lib, "Shlwapi.lib") // Link with Shlwapi.lib
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace desktop_updater
@@ -29,8 +31,16 @@ namespace desktop_updater
   void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
   void runBatFile();
   std::wstring FindTempUpdateDirectory();
+  bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds = 60);
+  DWORD GetParentProcessId();
+  bool IsProcessRunning(DWORD processId);
+  bool WaitForExecutableToBeFree(const wchar_t* executablePath, DWORD timeoutSeconds = 30);
+  std::vector<DWORD> FindProcessesByExecutable(const wchar_t* executablePath);
+  bool KillProcess(DWORD processId);
+  void KillAllProcessesByExecutable(const wchar_t* executablePath);
 
-  // Check if the application was started with elevated update arguments
+  DWORD g_parentProcessId = 0;
+
   bool CheckForElevatedUpdate()
   {
     int argc;
@@ -42,6 +52,10 @@ namespace desktop_updater
       {
         if (wcscmp(argv[i], L"--update-elevated") == 0)
         {
+          if (i + 1 < argc)
+          {
+            g_parentProcessId = _wtoi(argv[i + 1]);
+          }
           LocalFree(argv);
           return true;
         }
@@ -88,32 +102,322 @@ namespace desktop_updater
     return L"";
   }
 
-  // Execute the update process when running elevated
+  DWORD GetParentProcessId()
+  {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+    {
+      return 0;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD currentPid = GetCurrentProcessId();
+
+    if (Process32FirstW(hSnapshot, &pe32))
+    {
+      do
+      {
+        if (pe32.th32ProcessID == currentPid)
+        {
+          CloseHandle(hSnapshot);
+          return pe32.th32ParentProcessID;
+        }
+      } while (Process32NextW(hSnapshot, &pe32));
+    }
+
+    CloseHandle(hSnapshot);
+    return 0;
+  }
+
+  bool IsProcessRunning(DWORD processId)
+  {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, processId);
+    if (hProcess == NULL)
+    {
+      return false;
+    }
+
+    DWORD exitCode;
+    if (GetExitCodeProcess(hProcess, &exitCode))
+    {
+      CloseHandle(hProcess);
+      return (exitCode == STILL_ACTIVE);
+    }
+
+    CloseHandle(hProcess);
+    return false;
+  }
+
+  std::wstring NormalizePath(const wchar_t* path)
+  {
+    wchar_t normalizedPath[MAX_PATH];
+    if (GetFullPathNameW(path, MAX_PATH, normalizedPath, NULL) == 0)
+    {
+      return std::wstring(path);
+    }
+    
+    wchar_t* longPath = normalizedPath;
+    wchar_t longPathBuffer[MAX_PATH * 2];
+    if (GetLongPathNameW(normalizedPath, longPathBuffer, MAX_PATH * 2) > 0)
+    {
+      longPath = longPathBuffer;
+    }
+    
+    for (wchar_t* p = longPath; *p; p++)
+    {
+      if (*p == L'/')
+      {
+        *p = L'\\';
+      }
+      else if (*p >= L'A' && *p <= L'Z')
+      {
+        *p = *p - L'A' + L'a';
+      }
+    }
+    
+    return std::wstring(longPath);
+  }
+
+  std::vector<DWORD> FindProcessesByExecutable(const wchar_t* executablePath)
+  {
+    std::vector<DWORD> pids;
+    std::wstring normalizedTargetPath = NormalizePath(executablePath);
+    
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+    {
+      return pids;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    if (Process32FirstW(hSnapshot, &pe32))
+    {
+      do
+      {
+        if (pe32.th32ProcessID == GetCurrentProcessId())
+        {
+          continue;
+        }
+
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe32.th32ProcessID);
+        if (hProcess != NULL)
+        {
+          wchar_t processPath[MAX_PATH];
+          DWORD pathSize = MAX_PATH;
+          if (QueryFullProcessImageNameW(hProcess, 0, processPath, &pathSize))
+          {
+            std::wstring normalizedProcessPath = NormalizePath(processPath);
+            if (normalizedProcessPath == normalizedTargetPath)
+            {
+              pids.push_back(pe32.th32ProcessID);
+            }
+          }
+          CloseHandle(hProcess);
+        }
+      } while (Process32NextW(hSnapshot, &pe32));
+    }
+
+    CloseHandle(hSnapshot);
+    return pids;
+  }
+
+  bool WaitForExecutableToBeFree(const wchar_t* executablePath, DWORD timeoutSeconds)
+  {
+    printf("Verificando se o executável está liberado: %ls\n", executablePath);
+    
+    DWORD startTime = GetTickCount();
+    DWORD timeoutMs = timeoutSeconds * 1000;
+
+    while ((GetTickCount() - startTime) < timeoutMs)
+    {
+      HANDLE hFile = CreateFileW(executablePath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (hFile != INVALID_HANDLE_VALUE)
+      {
+        CloseHandle(hFile);
+        printf("Executável está liberado.\n");
+        return true;
+      }
+
+      DWORD error = GetLastError();
+      if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION)
+      {
+        Sleep(500);
+        continue;
+      }
+      else
+      {
+        printf("Erro ao verificar arquivo: %lu\n", error);
+        return false;
+      }
+    }
+
+    printf("Timeout aguardando executável ser liberado.\n");
+    return false;
+  }
+
+  bool KillProcess(DWORD processId)
+  {
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
+    if (hProcess == NULL)
+    {
+      DWORD error = GetLastError();
+      if (error == ERROR_INVALID_PARAMETER)
+      {
+        printf("Processo %lu já não existe mais.\n", processId);
+        return true;
+      }
+      printf("Não foi possível abrir o processo %lu para encerrar. Erro: %lu\n", processId, error);
+      return false;
+    }
+
+    printf("Forçando encerramento do processo %lu...\n", processId);
+    BOOL result = TerminateProcess(hProcess, 1);
+    CloseHandle(hProcess);
+
+    if (result)
+    {
+      printf("Processo %lu encerrado forçadamente.\n", processId);
+      Sleep(1000);
+      return true;
+    }
+    else
+    {
+      printf("Falha ao encerrar processo %lu. Erro: %lu\n", processId, GetLastError());
+      return false;
+    }
+  }
+
+  void KillAllProcessesByExecutable(const wchar_t* executablePath)
+  {
+    std::vector<DWORD> processes = FindProcessesByExecutable(executablePath);
+    DWORD currentPid = GetCurrentProcessId();
+
+    for (DWORD pid : processes)
+    {
+      if (pid != currentPid && IsProcessRunning(pid))
+      {
+        printf("Matando processo %lu...\n", pid);
+        KillProcess(pid);
+      }
+    }
+  }
+
+  bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds)
+  {
+    HANDLE hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, processId);
+    if (hProcess == NULL)
+    {
+      DWORD error = GetLastError();
+      if (error == ERROR_INVALID_PARAMETER)
+      {
+        printf("Processo %lu não existe mais (já encerrado).\n", processId);
+        return true;
+      }
+      printf("Não foi possível abrir o processo %lu. Erro: %lu\n", processId, error);
+      return false;
+    }
+
+    printf("Aguardando processo %lu encerrar (timeout: %lu segundos)...\n", processId, timeoutSeconds);
+    DWORD waitResult = WaitForSingleObject(hProcess, timeoutSeconds * 1000);
+    CloseHandle(hProcess);
+
+    if (waitResult == WAIT_OBJECT_0)
+    {
+      printf("Processo %lu encerrado com sucesso.\n", processId);
+      Sleep(1000);
+      return true;
+    }
+    else if (waitResult == WAIT_TIMEOUT)
+    {
+      printf("Timeout aguardando processo %lu encerrar. Forçando encerramento...\n", processId);
+      KillProcess(processId);
+      return true;
+    }
+    else
+    {
+      printf("Erro ao aguardar processo %lu: %lu. Tentando forçar encerramento...\n", processId, waitResult);
+      KillProcess(processId);
+      return true;
+    }
+  }
+
   void ExecuteElevatedUpdate()
   {
-    printf("Executing elevated update process...\n");
+    printf("Executando processo de atualização elevado...\n");
     
-    // Get the current executable file path
     wchar_t executable_path[MAX_PATH];
     GetModuleFileNameW(NULL, executable_path, MAX_PATH);
+    printf("Caminho do executável: %ls\n", executable_path);
 
-    printf("Executable path: %ls\n", executable_path);
+    DWORD parentPid = g_parentProcessId;
+    if (parentPid == 0)
+    {
+      parentPid = GetParentProcessId();
+    }
 
-    // Try to find temp update directory first
+    std::vector<DWORD> allProcesses = FindProcessesByExecutable(executable_path);
+    printf("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
+
+    if (parentPid != 0)
+    {
+      printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
+      WaitForProcessToExit(parentPid, 15);
+    }
+
+    for (DWORD pid : allProcesses)
+    {
+      if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
+      {
+        printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
+        WaitForProcessToExit(pid, 10);
+      }
+    }
+
+    printf("Verificando processos restantes...\n");
+    allProcesses = FindProcessesByExecutable(executable_path);
+    bool hasRunningProcesses = false;
+    for (DWORD pid : allProcesses)
+    {
+      if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
+      {
+        hasRunningProcesses = true;
+        break;
+      }
+    }
+
+    if (hasRunningProcesses)
+    {
+      printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(2000);
+    }
+
+    printf("Verificando se o executável está liberado...\n");
+    if (!WaitForExecutableToBeFree(executable_path, 15))
+    {
+      printf("Executável ainda em uso. Forçando encerramento novamente...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(2000);
+    }
+
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
     std::wstring destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
-      printf("Found temp update directory: %ls\n", tempUpdateDir.c_str());
+      printf("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
-    // Create and run the batch file for updating
+    printf("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
+    
+    printf("Executando arquivo .bat...\n");
     runBatFile();
 
-    // Exit after update
     ExitProcess(0);
   }
 
@@ -237,24 +541,24 @@ namespace desktop_updater
     return isAdmin == TRUE;
   }
 
-  // Request administrator privileges and restart the application with elevation
   bool RequestAdminPrivileges()
   {
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
-    // Use ShellExecuteW with "runas" to request elevation
-    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, L"--update-elevated", NULL, SW_SHOW);
+    DWORD currentPid = GetCurrentProcessId();
+    wchar_t args[64];
+    swprintf_s(args, 64, L"--update-elevated %lu", currentPid);
+
+    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args, NULL, SW_SHOW);
 
     if ((INT_PTR)result > 32)
     {
-      // Successfully started elevated process, exit current process
       return true;
     }
     else
     {
-      // User cancelled UAC or other error
-      std::wcout << L"Failed to get administrator privileges. Error code: " << (INT_PTR)result << std::endl;
+      std::wcout << L"Falha ao obter privilégios de administrador. Código de erro: " << (INT_PTR)result << std::endl;
       return false;
     }
   }
@@ -288,58 +592,91 @@ namespace desktop_updater
 
   void RestartApp()
   {
-    printf("Restarting the application...\n");
+    printf("Reiniciando a aplicação...\n");
 
-    // First check if we're already running as administrator
     if (!IsRunningAsAdmin())
     {
-      printf("Not running as administrator. Requesting elevation...\n");
+      printf("Não está rodando como administrador. Solicitando elevação...\n");
       
-      // Request administrator privileges
       if (RequestAdminPrivileges())
       {
-        // Successfully started elevated process, exit current process
-        printf("Elevated process started. Exiting current process.\n");
+        printf("Processo elevado iniciado. Encerrando processo atual.\n");
         ExitProcess(0);
       }
       else
       {
-        // User cancelled UAC or elevation failed
-        printf("Failed to get administrator privileges. Update cancelled.\n");
-        return; // Don't proceed with update
+        printf("Falha ao obter privilégios de administrador. Atualização cancelada.\n");
+        return;
       }
     }
 
-    // If we reach here, we're running as administrator
-    printf("Running with administrator privileges. Proceeding with update...\n");
+    printf("Rodando com privilégios de administrador. Procedendo com atualização...\n");
 
-    // Get the current executable file path
-    char szFilePath[MAX_PATH];
-    GetModuleFileNameA(NULL, szFilePath, MAX_PATH);
-
-    // Child process
     wchar_t executable_path[MAX_PATH];
     GetModuleFileNameW(NULL, executable_path, MAX_PATH);
+    printf("Caminho do executável: %ls\n", executable_path);
 
-    printf("Executable path: %ls\n", executable_path);
+    DWORD parentPid = GetParentProcessId();
+    std::vector<DWORD> allProcesses = FindProcessesByExecutable(executable_path);
+    printf("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
 
-    // Try to find temp update directory first
+    if (parentPid != 0 && parentPid != GetCurrentProcessId())
+    {
+      printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
+      WaitForProcessToExit(parentPid, 15);
+    }
+
+    for (DWORD pid : allProcesses)
+    {
+      if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
+      {
+        printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
+        WaitForProcessToExit(pid, 10);
+      }
+    }
+
+    printf("Verificando processos restantes...\n");
+    allProcesses = FindProcessesByExecutable(executable_path);
+    bool hasRunningProcesses = false;
+    for (DWORD pid : allProcesses)
+    {
+      if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
+      {
+        hasRunningProcesses = true;
+        break;
+      }
+    }
+
+    if (hasRunningProcesses)
+    {
+      printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(2000);
+    }
+
+    printf("Verificando se o executável está liberado...\n");
+    if (!WaitForExecutableToBeFree(executable_path, 15))
+    {
+      printf("Executável ainda em uso. Forçando encerramento novamente...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(2000);
+    }
+
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
     std::wstring destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
-      printf("Found temp update directory: %ls\n", tempUpdateDir.c_str());
+      printf("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
-    // Update createBatFile call with parameters
+    printf("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
-    // 3. .bat dosyasını çalıştır
+    printf("Executando arquivo .bat...\n");
     runBatFile();
 
-    // Exit the current process
     ExitProcess(0);
   }
 
