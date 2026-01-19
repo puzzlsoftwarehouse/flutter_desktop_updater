@@ -244,7 +244,7 @@ namespace desktop_updater
       DWORD error = GetLastError();
       if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION)
       {
-        Sleep(500);
+        Sleep(100);
         continue;
       }
       else
@@ -280,7 +280,7 @@ namespace desktop_updater
     if (result)
     {
       printf("Processo %lu encerrado forçadamente.\n", processId);
-      Sleep(1000);
+      Sleep(200);
       return true;
     }
     else
@@ -307,6 +307,12 @@ namespace desktop_updater
 
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds)
   {
+    if (!IsProcessRunning(processId))
+    {
+      printf("Processo %lu já encerrado.\n", processId);
+      return true;
+    }
+
     HANDLE hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, processId);
     if (hProcess == NULL)
     {
@@ -327,7 +333,7 @@ namespace desktop_updater
     if (waitResult == WAIT_OBJECT_0)
     {
       printf("Processo %lu encerrado com sucesso.\n", processId);
-      Sleep(1000);
+      Sleep(200);
       return true;
     }
     else if (waitResult == WAIT_TIMEOUT)
@@ -364,7 +370,7 @@ namespace desktop_updater
     if (parentPid != 0)
     {
       printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
-      WaitForProcessToExit(parentPid, 15);
+      WaitForProcessToExit(parentPid, 3);
     }
 
     for (DWORD pid : allProcesses)
@@ -372,7 +378,7 @@ namespace desktop_updater
       if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
       {
         printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
-        WaitForProcessToExit(pid, 10);
+        WaitForProcessToExit(pid, 2);
       }
     }
 
@@ -392,15 +398,15 @@ namespace desktop_updater
     {
       printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(2000);
+      Sleep(300);
     }
 
     printf("Verificando se o executável está liberado...\n");
-    if (!WaitForExecutableToBeFree(executable_path, 15))
+    if (!WaitForExecutableToBeFree(executable_path, 3))
     {
       printf("Executável ainda em uso. Forçando encerramento novamente...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(2000);
+      Sleep(300);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -623,7 +629,7 @@ namespace desktop_updater
     if (parentPid != 0 && parentPid != GetCurrentProcessId())
     {
       printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
-      WaitForProcessToExit(parentPid, 15);
+      WaitForProcessToExit(parentPid, 3);
     }
 
     for (DWORD pid : allProcesses)
@@ -631,7 +637,7 @@ namespace desktop_updater
       if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
       {
         printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
-        WaitForProcessToExit(pid, 10);
+        WaitForProcessToExit(pid, 2);
       }
     }
 
@@ -651,15 +657,15 @@ namespace desktop_updater
     {
       printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(2000);
+      Sleep(300);
     }
 
     printf("Verificando se o executável está liberado...\n");
-    if (!WaitForExecutableToBeFree(executable_path, 15))
+    if (!WaitForExecutableToBeFree(executable_path, 3))
     {
       printf("Executável ainda em uso. Forçando encerramento novamente...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(2000);
+      Sleep(300);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
