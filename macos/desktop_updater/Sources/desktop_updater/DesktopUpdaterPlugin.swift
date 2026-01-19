@@ -261,25 +261,45 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             rm -rf "$TEMP_DIR"
             exit 1
         fi
-        log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
-        FRAMEWORKS_DIR="$TEMP_BUNDLE/Contents/Frameworks"
-        if [ -d "$FRAMEWORKS_DIR" ]; then
-            find "$FRAMEWORKS_DIR" -type f | while read -r binary; do
-                if [ -L "$binary" ]; then continue; fi
-                if file "$binary" 2>/dev/null | grep -qE "Mach-O|executable|library"; then
-                    codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$binary" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
+
+        log_message "All files verified successfully"
+
+        # Re-seal the bundle after copying (bundle seal is invalidated when contents change).
+        # Frameworks and executable from the backend are already signed and notarized; we only
+        # need to re-sign the bundle container so its seal matches the new contents.
+        if [ "$IS_DEBUG" = false ]; then
+            log_message "Re-signing bundle seal after copy (update files are already signed)..."
+            
+            ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
+                ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+            fi
+            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] && [ -n "$ORIGINAL_TEAM_ID" ]; then
+                ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
+            fi
+            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] || [ "$ORIGINAL_SIGNING_IDENTITY" = "Apple" ]; then
+                if [ -n "$ORIGINAL_TEAM_ID" ]; then
+                    ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
                 fi
-            done
-            find "$FRAMEWORKS_DIR" -name "*.framework" -type d | while read -r framework; do
-                FRAMEWORK_NAME=$(basename "$framework" .framework)
-                for possible_path in "$framework/Versions/A/$FRAMEWORK_NAME" "$framework/Versions/Current/$FRAMEWORK_NAME" "$framework/$FRAMEWORK_NAME"; do
-                    if [ -f "$possible_path" ] && file "$possible_path" 2>/dev/null | grep -qE "Mach-O|executable|library"; then
-                        codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$possible_path" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
-                        break
-                    fi
-                done
-                codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$framework" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
-            done
+            fi
+            
+            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
+                log_message "ERROR: Could not determine signing identity from original bundle"
+                log_message "  Attempted to extract from: $APP_BUNDLE_PATH"
+                log_message "  Original team ID: $ORIGINAL_TEAM_ID"
+                codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | head -20 | tee -a "$LOG_FILE" || true
+                rm -rf "$TEMP_DIR"
+                exit 1
+            fi
+            log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
+            
+            log_message "Re-signing bundle: $TEMP_BUNDLE"
+            if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
+                log_message "  ERROR: Failed to re-sign bundle"
+                rm -rf "$TEMP_DIR"
+                exit 1
+            fi
+            log_message "  ✓ Bundle re-signed successfully"
         fi
         TEMP_EXECUTABLE="$TEMP_BUNDLE/Contents/MacOS/$(basename "$EXECUTABLE_PATH")"
         if [ -f "$TEMP_EXECUTABLE" ]; then
