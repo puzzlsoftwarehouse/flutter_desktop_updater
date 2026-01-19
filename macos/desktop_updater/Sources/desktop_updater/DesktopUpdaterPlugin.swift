@@ -209,18 +209,26 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             exit 1
         fi
 
-        # Create temporary directory for the update
-        TEMP_DIR=$(mktemp -d)
+        # Create temporary directory on the same volume as the app (enables reflink for speed)
+        APP_DIR="$(dirname "$APP_BUNDLE_PATH")"
+        TEMP_DIR=$(mktemp -d "${APP_DIR}/.update.XXXXXX" 2>/dev/null)
+        if [ ! -d "$TEMP_DIR" ]; then
+            TEMP_DIR=$(mktemp -d)
+        fi
         log_message "Created temporary directory: $TEMP_DIR"
 
-        # Copy the original bundle to the temporary directory
-        log_message "Copying original bundle to temporary directory..."
-        if ! cp -R "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+        # Copy the original bundle: try reflink (APFS, nearly instant) then ditto then cp -R
+        log_message "Copying bundle (reflink -> ditto -> cp fallback)..."
+        if cp -R -c "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>/dev/null; then
+            log_message "  Used reflink (clone) - minimal I/O"
+        elif ditto "$APP_BUNDLE_PATH" "$TEMP_DIR/$(basename "$APP_BUNDLE_PATH")" 2>/dev/null; then
+            log_message "  Used ditto (optimized for bundles)"
+        elif cp -R "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+            log_message "  Used cp -R (fallback)"
+        else
             log_message "ERROR: Failed to copy bundle to temporary directory"
             log_message "  Source: $APP_BUNDLE_PATH"
             log_message "  Destination: $TEMP_DIR/"
-            log_message "  Error details:"
-            cp -R "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>&1 | tee -a "$LOG_FILE" || true
             rm -rf "$TEMP_DIR"
             exit 1
         fi
@@ -288,280 +296,25 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             log_message "Team identifier verified: $UPDATE_TEAM_ID"
         fi
 
-        # Copy update files one by one with detailed error reporting
-        log_message "Starting to copy update files to temporary bundle..."
-        log_message "  Source: $UPDATE_FOLDER_PATH"
-        log_message "  Destination: $DEST_DIR"
-        
-        COPY_ERRORS=0
-        COPIED_FILES=0
-        COPIED_DIRS=0
-        
-        # Function to copy a single file with error handling
-        copy_file_with_details() {
-            local src_file="$1"
-            local dest_path="$2"
-            local relative_path="$3"
-            
-            log_message "  Copying: $relative_path"
-            
-            # Get file info
-            if [ -f "$src_file" ]; then
-                local file_size=$(stat -f%z "$src_file" 2>/dev/null || echo "unknown")
-                log_message "    Size: ${file_size} bytes"
-            fi
-            
-            # Check source file permissions
-            if [ ! -r "$src_file" ]; then
-                log_message "    ERROR: Source file is not readable"
-                log_message "    Source permissions: $(ls -l "$src_file" 2>&1 || echo 'unknown')"
-                COPY_ERRORS=$((COPY_ERRORS + 1))
-                return 1
-            fi
-            
-            # Create destination directory if needed
-            local dest_dir=$(dirname "$dest_path")
-            if [ ! -d "$dest_dir" ]; then
-                log_message "    Creating destination directory: $dest_dir"
-                if ! mkdir -p "$dest_dir" 2>&1 | tee -a "$LOG_FILE"; then
-                    log_message "    ERROR: Failed to create destination directory"
-                    log_message "    Directory: $dest_dir"
-                    log_message "    Permissions: $(ls -ld "$(dirname "$dest_dir")" 2>&1 || echo 'unknown')"
-                    COPY_ERRORS=$((COPY_ERRORS + 1))
-                    return 1
-                fi
-            fi
-            
-            # Check if destination directory is writable
-            if [ ! -w "$dest_dir" ]; then
-                log_message "    ERROR: Destination directory is not writable"
-                log_message "    Directory: $dest_dir"
-                log_message "    Permissions: $(ls -ld "$dest_dir" 2>&1 || echo 'unknown')"
-                log_message "    Owner: $(stat -f '%Su' "$dest_dir" 2>/dev/null || echo 'unknown')"
-                log_message "    Current user: $(whoami)"
-                COPY_ERRORS=$((COPY_ERRORS + 1))
-                return 1
-            fi
-            
-            # Perform the copy with error capture
-            local cp_output=$(cp -p "$src_file" "$dest_path" 2>&1)
-            local cp_exit_code=$?
-            
-            if [ $cp_exit_code -ne 0 ]; then
-                log_message "    ERROR: Failed to copy file"
-                log_message "    Source: $src_file"
-                log_message "    Destination: $dest_path"
-                log_message "    Exit code: $cp_exit_code"
-                log_message "    Error output: $cp_output"
-                log_message "    Source file info:"
-                ls -l "$src_file" 2>&1 | tee -a "$LOG_FILE" || true
-                log_message "    Destination directory info:"
-                ls -ld "$dest_dir" 2>&1 | tee -a "$LOG_FILE" || true
-                COPY_ERRORS=$((COPY_ERRORS + 1))
-                return 1
-            fi
-            
-            # Verify the file was copied correctly
-            if [ ! -f "$dest_path" ]; then
-                log_message "    ERROR: File was not copied (destination does not exist)"
-                log_message "    Expected: $dest_path"
-                COPY_ERRORS=$((COPY_ERRORS + 1))
-                return 1
-            fi
-            
-            # Verify file sizes match (if source is a regular file)
-            if [ -f "$src_file" ] && [ -f "$dest_path" ]; then
-                local src_size=$(stat -f%z "$src_file" 2>/dev/null || echo "0")
-                local dest_size=$(stat -f%z "$dest_path" 2>/dev/null || echo "0")
-                if [ "$src_size" != "$dest_size" ]; then
-                    log_message "    ERROR: File size mismatch after copy"
-                    log_message "    Source size: $src_size bytes"
-                    log_message "    Destination size: $dest_size bytes"
-                    COPY_ERRORS=$((COPY_ERRORS + 1))
-                    return 1
-                fi
-            fi
-            
-            COPIED_FILES=$((COPIED_FILES + 1))
-            log_message "    ✓ Successfully copied"
-            return 0
-        }
-        
-        # Copy files and directories
-        # Save current directory
-        ORIGINAL_DIR=$(pwd)
-        
-        # Change to update folder to avoid path issues
-        cd "$UPDATE_FOLDER_PATH" || {
-            log_message "ERROR: Failed to change to update folder: $UPDATE_FOLDER_PATH"
+        # Overlay update files with rsync (single pass, faster than per-item cp -R)
+        log_message "Overlaying update files: $UPDATE_FOLDER_PATH -> $DEST_DIR"
+        if [ ! -d "$UPDATE_FOLDER_PATH" ]; then
+            log_message "ERROR: Update folder not found: $UPDATE_FOLDER_PATH"
             rm -rf "$TEMP_DIR"
             exit 1
-        }
-        
-        log_message "Current directory: $(pwd)"
-        log_message "Destination directory: $DEST_DIR"
-        
-        for item in *; do
-            # Skip if glob didn't match anything
-            if [ "$item" = "*" ] && [ ! -e "$item" ]; then
-                log_message "  No items found in update folder"
-                break
-            fi
-            
-            # Skip . and ..
-            if [ "$item" = "." ] || [ "$item" = ".." ]; then
-                continue
-            fi
-            
-            # Build absolute paths - don't use local to avoid scope issues
-            CURRENT_DIR=$(pwd)
-            item_path="$CURRENT_DIR/$item"
-            dest_item="$DEST_DIR/$item"
-            verify_path="$DEST_DIR/$item"
-            
-            # Debug: show all variables
-            log_message "  Processing: $item"
-            log_message "    CURRENT_DIR: $CURRENT_DIR"
-            log_message "    item: $item"
-            log_message "    DEST_DIR: $DEST_DIR"
-            log_message "    Source path: $item_path"
-            log_message "    Destination path: $dest_item"
-            log_message "    Verify path: $verify_path"
-            
-            # Skip log files - they shouldn't be copied to the bundle
-            if [[ "$item" == *.log ]]; then
-                log_message "    Skipping log file: $item"
-                continue
-            fi
-            
-            if [ -d "$item" ]; then
-                log_message "    Type: directory"
-                # Remove destination if it exists to avoid conflicts with symlinks
-                if [ -e "$verify_path" ]; then
-                    log_message "    Removing existing destination: $verify_path"
-                    rm -rf "$verify_path" 2>&1 | tee -a "$LOG_FILE" || {
-                        log_message "    WARNING: Failed to remove existing destination, will attempt copy anyway"
-                    }
-                fi
-                
-                # Copy directory recursively, preserving symlinks
-                cp_output=$(cp -R -p "$item" "$DEST_DIR/" 2>&1)
-                cp_exit_code=$?
-                
-                log_message "    Copy command exit code: $cp_exit_code"
-                if [ -n "$cp_output" ]; then
-                    log_message "    Copy output: $cp_output"
-                fi
-                
-                if [ $cp_exit_code -ne 0 ]; then
-                    log_message "    ERROR: Failed to copy directory"
-                    log_message "    Source: $item_path"
-                    log_message "    Destination: $DEST_DIR"
-                    log_message "    Exit code: $cp_exit_code"
-                    log_message "    Error output: $cp_output"
-                    log_message "    Attempting alternative copy method (rsync)..."
-                    
-                    # Try using rsync as fallback if available
-                    if command -v rsync >/dev/null 2>&1; then
-                        rsync_output=$(rsync -a --delete "$item_path/" "$verify_path/" 2>&1)
-                        rsync_exit_code=$?
-                        if [ $rsync_exit_code -eq 0 ]; then
-                            log_message "    ✓ Successfully copied using rsync"
-                            COPIED_DIRS=$((COPIED_DIRS + 1))
-                        else
-                            log_message "    ERROR: rsync also failed"
-                            log_message "    rsync output: $rsync_output"
-                            COPY_ERRORS=$((COPY_ERRORS + 1))
-                        fi
-                    else
-                        COPY_ERRORS=$((COPY_ERRORS + 1))
-                    fi
-                else
-                    # Verify directory was copied - use absolute path
-                    log_message "    Verifying copy..."
-                    log_message "    Checking if $verify_path exists..."
-                    if [ -d "$verify_path" ]; then
-                        log_message "    ✓ Directory exists at $verify_path"
-                        COPIED_DIRS=$((COPIED_DIRS + 1))
-                        log_message "    ✓ Successfully copied directory"
-                    else
-                        log_message "    ERROR: Directory was not copied (destination does not exist)"
-                        log_message "    Expected: $verify_path"
-                        log_message "    DEST_DIR value: $DEST_DIR"
-                        log_message "    item value: $item"
-                        log_message "    Checking destination directory contents:"
-                        ls -la "$DEST_DIR" 2>&1 | tee -a "$LOG_FILE" || true
-                        log_message "    Checking if item exists with different case or path:"
-                        find "$DEST_DIR" -maxdepth 1 -iname "$item" 2>&1 | tee -a "$LOG_FILE" || true
-                        COPY_ERRORS=$((COPY_ERRORS + 1))
-                    fi
-                fi
-            elif [ -f "$item" ]; then
-                log_message "    Type: file"
-                copy_file_with_details "$item_path" "$dest_item" "$item"
-            else
-                log_message "    WARNING: Skipping unknown type: $item"
-                log_message "    File info:"
-                ls -la "$item" 2>&1 | tee -a "$LOG_FILE" || true
-            fi
-        done
-        
-        # Return to original directory
-        cd "$ORIGINAL_DIR" || cd "$HOME"
-        
-        # Summary of copy operation
-        log_message "Copy operation summary:"
-        log_message "  Files copied: $COPIED_FILES"
-        log_message "  Directories copied: $COPIED_DIRS"
-        log_message "  Errors: $COPY_ERRORS"
-        
-        if [ $COPY_ERRORS -gt 0 ]; then
-            log_message "ERROR: Failed to copy $COPY_ERRORS file(s)/directory(ies)"
-            log_message "  Source folder: $UPDATE_FOLDER_PATH"
-            log_message "  Destination folder: $DEST_DIR"
-            log_message "  Please check the log above for details about which files failed"
+        fi
+        if rsync -a --exclude='*.log' "$UPDATE_FOLDER_PATH/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+            log_message "  ✓ Update files overlayed (rsync)"
+        else
+            log_message "ERROR: rsync overlay failed"
             rm -rf "$TEMP_DIR"
             exit 1
         fi
 
-        # Verify that files were copied correctly by checking a few key files
-        log_message "Verifying copied files..."
-        VERIFICATION_ERRORS=0
-        # Use find to get only regular files, avoiding glob expansion issues
-        while IFS= read -r file; do
-            # Skip if empty or if it's the glob pattern itself (didn't expand)
-            if [ -z "$file" ] || [ "$file" = "$UPDATE_FOLDER_PATH/*" ]; then
-                continue
-            fi
-            
-            # Only process regular files (not directories)
-            if [ -f "$file" ]; then
-                local file_name=$(basename "$file")
-                # Skip if file_name is empty
-                if [ -z "$file_name" ]; then
-                    continue
-                fi
-                
-                local dest_file="$DEST_DIR/$file_name"
-                if [ ! -f "$dest_file" ]; then
-                    log_message "  ERROR: File verification failed - destination does not exist: $file_name"
-                    VERIFICATION_ERRORS=$((VERIFICATION_ERRORS + 1))
-                else
-                    # Compare file sizes
-                    local src_size=$(stat -f%z "$file" 2>/dev/null || echo "0")
-                    local dest_size=$(stat -f%z "$dest_file" 2>/dev/null || echo "0")
-                    if [ "$src_size" != "$dest_size" ]; then
-                        log_message "  ERROR: File size mismatch: $file_name (src: $src_size, dest: $dest_size)"
-                        VERIFICATION_ERRORS=$((VERIFICATION_ERRORS + 1))
-                    else
-                        log_message "  ✓ Verified: $file_name"
-                    fi
-                fi
-            fi
-        done < <(find "$UPDATE_FOLDER_PATH" -maxdepth 1 -type f 2>/dev/null || true)
-        
-        if [ $VERIFICATION_ERRORS -gt 0 ]; then
-            log_message "ERROR: File verification failed for $VERIFICATION_ERRORS file(s)"
+        # Quick check: executable must exist after overlay
+        EXECUTABLE_NAME="$(basename "$EXECUTABLE_PATH")"
+        if [ ! -f "$DEST_DIR/MacOS/$EXECUTABLE_NAME" ]; then
+            log_message "ERROR: Executable missing after overlay: MacOS/$EXECUTABLE_NAME"
             rm -rf "$TEMP_DIR"
             exit 1
         fi
@@ -696,9 +449,9 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         rm -rf "$TEMP_DIR"
         log_message "Temporary directory cleaned up"
 
-        # Wait before opening the application
+        # Brief pause before launching
         log_message "Waiting before launching application..."
-        sleep 3
+        sleep 1
 
         # Try to open the application
         log_message "Launching application..."

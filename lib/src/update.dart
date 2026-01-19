@@ -90,7 +90,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
 
       final fileProgress = <String, double>{};
 
-      const maxConcurrentDownloads = 20;
+      const maxConcurrentDownloads = 100;
       final activeDownloads = <Completer<void>>[];
       final downloadQueue = <FileHashModel>[];
 
