@@ -146,14 +146,26 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             exit 1
         fi
 
-        # Create temporary directory for the update
-        TEMP_DIR=$(mktemp -d)
+        # Create temporary directory on the same volume as the app (enables reflink for speed)
+        APP_DIR="$(dirname "$APP_BUNDLE_PATH")"
+        TEMP_DIR=$(mktemp -d "${APP_DIR}/.update.XXXXXX" 2>/dev/null)
+        if [ ! -d "$TEMP_DIR" ]; then
+            TEMP_DIR=$(mktemp -d)
+        fi
         log_message "Created temporary directory: $TEMP_DIR"
 
-        # Copy the original bundle to the temporary directory
-        log_message "Copying original bundle to temporary directory..."
-        if ! cp -R "$APP_BUNDLE_PATH" "$TEMP_DIR/"; then
-            log_message "Error: Failed to copy bundle to temporary directory"
+        # Copy the original bundle: try reflink (APFS, nearly instant) then ditto then cp -R
+        log_message "Copying bundle (reflink -> ditto -> cp fallback)..."
+        if cp -R -c "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>/dev/null; then
+            log_message "  Used reflink (clone) - minimal I/O"
+        elif ditto "$APP_BUNDLE_PATH" "$TEMP_DIR/$(basename "$APP_BUNDLE_PATH")" 2>/dev/null; then
+            log_message "  Used ditto (optimized for bundles)"
+        elif cp -R "$APP_BUNDLE_PATH" "$TEMP_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+            log_message "  Used cp -R (fallback)"
+        else
+            log_message "ERROR: Failed to copy bundle to temporary directory"
+            log_message "  Source: $APP_BUNDLE_PATH"
+            log_message "  Destination: $TEMP_DIR/"
             rm -rf "$TEMP_DIR"
             exit 1
         fi
@@ -198,70 +210,28 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             log_message "Team identifier verified: $UPDATE_TEAM_ID"
         fi
 
-        # Copy update files: remove each destination item first to avoid cp overwrite failures
-        log_message "Copying update files to temporary bundle..."
-        DEST_CONTENTS="$TEMP_BUNDLE/Contents"
-        for item in "$UPDATE_FOLDER_PATH"/*; do
-            if [ ! -e "$item" ]; then continue; fi
-            name=$(basename "$item")
-            if [ "$name" = "*" ]; then continue; fi
-            dest_path="$DEST_CONTENTS/$name"
-            log_message "  Copying: $name"
-            if [ "$name" = "Frameworks" ] && [ -d "$dest_path" ]; then
-                mkdir -p "$dest_path"
-                for fw in "$item"/*; do
-                    if [ -e "$fw" ]; then
-                        fw_name=$(basename "$fw")
-                        if [ "$fw_name" = "*" ]; then continue; fi
-                        log_message "    Framework: $fw_name"
-                        rm -rf "$dest_path/$fw_name"
-                        cp -R -p "$fw" "$dest_path/" || { log_message "Error: Failed to copy framework $fw_name"; rm -rf "$TEMP_DIR"; exit 1; }
-                    fi
-                done
-            else
-                rm -rf "$dest_path"
-                if ! cp -R -p "$item" "$DEST_CONTENTS/"; then
-                    log_message "Error: Failed to copy: $name"
-                    rm -rf "$TEMP_DIR"
-                    exit 1
-                fi
-            fi
-        done
-
-        # Verify that files were copied correctly
-        log_message "Verifying copied files..."
-        for file in "$UPDATE_FOLDER_PATH"/*; do
-            if [ -f "$file" ]; then
-                dest_file="$DEST_CONTENTS/$(basename "$file")"
-                if [ ! -f "$dest_file" ]; then
-                    log_message "Error: File was not copied correctly: $file"
-                    rm -rf "$TEMP_DIR"
-                    exit 1
-                fi
-            fi
-        done
-
-        # Re-sign bundle after copy (copy invalidates signatures; macOS requires valid signature to load)
-        log_message "Re-signing frameworks and bundle..."
-        ORIGINAL_TEAM_ID=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "TeamIdentifier" | awk '{print $2}')
-        ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
-        if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
-            ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+        # Overlay update files with rsync (single pass, faster than per-item cp -R)
+        log_message "Overlaying update files: $UPDATE_FOLDER_PATH -> $DEST_DIR"
+        if [ ! -d "$UPDATE_FOLDER_PATH" ]; then
+            log_message "ERROR: Update folder not found: $UPDATE_FOLDER_PATH"
+            rm -rf "$TEMP_DIR"
+            exit 1
         fi
-        if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] && [ -n "$ORIGINAL_TEAM_ID" ]; then
-            ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
-        fi
-        if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] || [ "$ORIGINAL_SIGNING_IDENTITY" = "Apple" ]; then
-            if [ -n "$ORIGINAL_TEAM_ID" ]; then
-                ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
-            fi
-        fi
-        if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
-            log_message "Error: Could not determine signing identity"
+        if rsync -a --exclude='*.log' "$UPDATE_FOLDER_PATH/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+            log_message "  ✓ Update files overlayed (rsync)"
+        else
+            log_message "ERROR: rsync overlay failed"
             rm -rf "$TEMP_DIR"
             exit 1
         fi
 
+        # Quick check: executable must exist after overlay
+        EXECUTABLE_NAME="$(basename "$EXECUTABLE_PATH")"
+        if [ ! -f "$DEST_DIR/MacOS/$EXECUTABLE_NAME" ]; then
+            log_message "ERROR: Executable missing after overlay: MacOS/$EXECUTABLE_NAME"
+            rm -rf "$TEMP_DIR"
+            exit 1
+        fi
         log_message "All files verified successfully"
 
         # Re-seal the bundle after copying (bundle seal is invalidated when contents change).
@@ -356,9 +326,9 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         # Clean up temporary directory
         rm -rf "$TEMP_DIR"
 
-        # Wait before opening the application
+        # Brief pause before launching
         log_message "Waiting before launching application..."
-        sleep 3
+        sleep 1
 
         # Try to open the application
         log_message "Launching application..."
