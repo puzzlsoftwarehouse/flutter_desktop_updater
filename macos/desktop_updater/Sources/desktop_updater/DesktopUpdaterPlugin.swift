@@ -567,25 +567,19 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         fi
         log_message "All files verified successfully"
 
-        # Re-sign frameworks and bundle after copying (signatures are broken by cp)
+        # Re-seal the bundle after copying (bundle seal is invalidated when contents change).
+        # Frameworks and executable from the backend are already signed and notarized; we only
+        # need to re-sign the bundle container so its seal matches the new contents.
         if [ "$IS_DEBUG" = false ]; then
-            log_message "Re-signing frameworks and bundle after copy..."
+            log_message "Re-signing bundle seal after copy (update files are already signed)..."
             
-            # Get the signing identity from the original bundle
-            # Extract Authority from codesign output - get the full identity, not just first word
             ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
-            
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
-                # Try alternative method: get from verbose output
                 ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             fi
-            
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] && [ -n "$ORIGINAL_TEAM_ID" ]; then
-                # Last resort: try to find identity by Team ID - get the full identity in quotes
                 ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
             fi
-            
-            # If still empty or just "Apple", try to get the first valid identity with the Team ID
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] || [ "$ORIGINAL_SIGNING_IDENTITY" = "Apple" ]; then
                 if [ -n "$ORIGINAL_TEAM_ID" ]; then
                     ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
@@ -596,108 +590,19 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
                 log_message "ERROR: Could not determine signing identity from original bundle"
                 log_message "  Attempted to extract from: $APP_BUNDLE_PATH"
                 log_message "  Original team ID: $ORIGINAL_TEAM_ID"
-                log_message "  This is required for release mode updates"
-                log_message "  Debug: codesign output:"
                 codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | head -20 | tee -a "$LOG_FILE" || true
                 rm -rf "$TEMP_DIR"
                 exit 1
-            else
-                log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
             fi
+            log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
             
-            # Re-sign all frameworks in Frameworks directory
-            # Must sign from inside out: binaries first, then frameworks, then bundle
-            FRAMEWORKS_DIR="$TEMP_BUNDLE/Contents/Frameworks"
-            if [ -d "$FRAMEWORKS_DIR" ]; then
-                log_message "Re-signing frameworks in: $FRAMEWORKS_DIR"
-                
-                # First, sign all binaries inside frameworks
-                find "$FRAMEWORKS_DIR" -type f | while read -r binary; do
-                    # Skip if it's a symlink
-                    if [ -L "$binary" ]; then
-                        continue
-                    fi
-                    # Check if it's a Mach-O binary (executable or library)
-                    if file "$binary" 2>/dev/null | grep -qE "Mach-O|executable|library"; then
-                        log_message "  Re-signing binary: $binary"
-                        if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$binary" 2>&1 | tee -a "$LOG_FILE"; then
-                            log_message "    ERROR: Failed to re-sign binary: $binary"
-                            rm -rf "$TEMP_DIR"
-                            exit 1
-                        fi
-                    fi
-                done
-                
-                # Then sign each framework (this will also sign the framework's main binary)
-                find "$FRAMEWORKS_DIR" -name "*.framework" -type d | while read -r framework; do
-                    log_message "  Re-signing framework: $framework"
-                    # Sign the framework's main binary first if it exists
-                    # Framework binary is typically at Versions/A/FrameworkName or Versions/Current/FrameworkName
-                    FRAMEWORK_NAME=$(basename "$framework" .framework)
-                    FRAMEWORK_BINARY=""
-                    # Try common locations
-                    for possible_path in "$framework/Versions/A/$FRAMEWORK_NAME" "$framework/Versions/Current/$FRAMEWORK_NAME" "$framework/$FRAMEWORK_NAME"; do
-                        if [ -f "$possible_path" ] && file "$possible_path" 2>/dev/null | grep -qE "Mach-O|executable|library"; then
-                            FRAMEWORK_BINARY="$possible_path"
-                            break
-                        fi
-                    done
-                    if [ -n "$FRAMEWORK_BINARY" ] && [ -f "$FRAMEWORK_BINARY" ]; then
-                        log_message "    Signing framework binary: $FRAMEWORK_BINARY"
-                        if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$FRAMEWORK_BINARY" 2>&1 | tee -a "$LOG_FILE"; then
-                            log_message "    ERROR: Failed to re-sign framework binary"
-                            rm -rf "$TEMP_DIR"
-                            exit 1
-                        fi
-                    fi
-                    # Sign the framework bundle itself
-                    if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$framework" 2>&1 | tee -a "$LOG_FILE"; then
-                        log_message "    ERROR: Failed to re-sign framework: $framework"
-                        rm -rf "$TEMP_DIR"
-                        exit 1
-                    fi
-                    log_message "    ✓ Successfully re-signed: $(basename "$framework")"
-                done
-            fi
-            
-            # Re-sign the executable
-            if [ -f "$TEMP_EXECUTABLE" ]; then
-                log_message "Re-signing executable: $TEMP_EXECUTABLE"
-                if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_EXECUTABLE" 2>&1 | tee -a "$LOG_FILE"; then
-                    log_message "  ERROR: Failed to re-sign executable"
-                    rm -rf "$TEMP_DIR"
-                    exit 1
-                fi
-                log_message "  ✓ Successfully re-signed executable"
-            fi
-            
-            # Re-sign the entire bundle (without --deep, which is deprecated)
-            log_message "Re-signing temporary bundle: $TEMP_BUNDLE"
+            log_message "Re-signing bundle: $TEMP_BUNDLE"
             if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
                 log_message "  ERROR: Failed to re-sign bundle"
                 rm -rf "$TEMP_DIR"
                 exit 1
             fi
-            log_message "  ✓ Successfully re-signed bundle"
-            
-            # Verify signatures after re-signing
-            log_message "Verifying signatures after re-signing..."
-            if [ -d "$FRAMEWORKS_DIR" ]; then
-                find "$FRAMEWORKS_DIR" -name "*.framework" -type d | while read -r framework; do
-                    if ! codesign -v "$framework" 2>&1 | tee -a "$LOG_FILE"; then
-                        log_message "  ERROR: Framework signature verification failed: $framework"
-                        rm -rf "$TEMP_DIR"
-                        exit 1
-                    fi
-                done
-            fi
-            if [ -f "$TEMP_EXECUTABLE" ]; then
-                if ! codesign -v "$TEMP_EXECUTABLE" 2>&1 | tee -a "$LOG_FILE"; then
-                    log_message "  ERROR: Executable signature verification failed"
-                    rm -rf "$TEMP_DIR"
-                    exit 1
-                fi
-            fi
+            log_message "  ✓ Bundle re-signed successfully"
         fi
 
         # Verify executable permissions in the temporary bundle
