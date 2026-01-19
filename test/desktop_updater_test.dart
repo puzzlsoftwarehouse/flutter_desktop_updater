@@ -11,7 +11,7 @@ class MockDesktopUpdaterPlatform
   Future<String?> getPlatformVersion() => Future.value("42");
 
   @override
-  Future<void> restartApp() {
+  Future<void> restartApp({int? waitForExitTimeoutMs}) {
     return Future.value();
   }
 

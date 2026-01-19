@@ -27,7 +27,7 @@ abstract class DesktopUpdaterPlatform extends PlatformInterface {
     throw UnimplementedError("platformVersion() has not been implemented.");
   }
 
-  Future<void> restartApp() {
+  Future<void> restartApp({int? waitForExitTimeoutMs}) {
     throw UnimplementedError("restartApp() has not been implemented.");
   }
 

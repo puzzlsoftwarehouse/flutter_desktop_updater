@@ -26,8 +26,8 @@ class DesktopUpdater {
   }
 
   /// Uygulamayı kapatır ve yeniden başlatır
-  Future<void> restartApp() {
-    return DesktopUpdaterPlatform.instance.restartApp();
+  Future<void> restartApp({int? waitForExitTimeoutMs}) {
+    return DesktopUpdaterPlatform.instance.restartApp(waitForExitTimeoutMs: waitForExitTimeoutMs);
   }
 
   Future<String?> getExecutablePath() {

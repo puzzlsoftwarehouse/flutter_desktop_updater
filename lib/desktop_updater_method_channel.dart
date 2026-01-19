@@ -16,8 +16,9 @@ class MethodChannelDesktopUpdater extends DesktopUpdaterPlatform {
   }
 
   @override
-  Future<void> restartApp() async {
-    await methodChannel.invokeMethod<void>("restartApp");
+  Future<void> restartApp({int? waitForExitTimeoutMs}) async {
+    // send timeout (ms) or null
+    return methodChannel.invokeMethod<void>("restartApp", [waitForExitTimeoutMs]);
   }
 
   @override

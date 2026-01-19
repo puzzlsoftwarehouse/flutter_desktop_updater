@@ -5,6 +5,7 @@
 #include <VersionHelpers.h>
 #include <Shlwapi.h> // Include Shlwapi.h for PathFileExistsW
 #include <shellapi.h> // ShellExecuteW for UAC elevation
+#include <tlhelp32.h> // For CreateToolhelp32Snapshot and PROCESSENTRY32
 
 #pragma comment(lib, "Version.lib") // Link with Version.lib
 #pragma comment(lib, "Shlwapi.lib") // Link with Shlwapi.lib
@@ -30,6 +31,10 @@ namespace desktop_updater
   void runBatFile();
   std::wstring FindTempUpdateDirectory();
 
+  // Globals for elevated update parsing
+  static DWORD g_targetPid = 0;
+  static DWORD g_waitTimeoutMs = 120000; // default 2 minutes, 0 = wait indefinitely
+
   // Check if the application was started with elevated update arguments
   bool CheckForElevatedUpdate()
   {
@@ -42,12 +47,94 @@ namespace desktop_updater
       {
         if (wcscmp(argv[i], L"--update-elevated") == 0)
         {
+          // Parse optional PID and timeout
+          if (i + 1 < argc)
+          {
+            // argv[i+1] should be PID
+            g_targetPid = (DWORD)_wtoi(argv[i+1]);
+          }
+          if (i + 2 < argc)
+          {
+            g_waitTimeoutMs = (DWORD)_wtoi(argv[i+2]);
+          }
           LocalFree(argv);
           return true;
         }
       }
       LocalFree(argv);
     }
+    return false;
+  }
+
+  // Helper: wait for a given process id to exit. Polls every 1s until timeout (ms).
+  // Returns true if the process exited (or was not found). False if timed out.
+  bool WaitForProcessExit(DWORD pid, DWORD timeoutMs)
+  {
+    if (pid == 0) return true; // Nothing to wait for
+
+    DWORD waited = 0;
+    const DWORD interval = 1000; // 1 second poll
+
+    while (true)
+    {
+      // Try to open the process with SYNCHRONIZE so we can wait on it
+      HANDLE hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (hProcess)
+      {
+        // Wait for up to 'interval' ms
+        DWORD waitRes = WaitForSingleObject(hProcess, interval);
+        CloseHandle(hProcess);
+        if (waitRes == WAIT_OBJECT_0)
+        {
+          // Process has exited
+          return true;
+        }
+      }
+      else
+      {
+        // Could not open process handle (insufficient rights or not exist). Check snapshot to see if it still exists.
+        bool exists = false;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE)
+        {
+          PROCESSENTRY32W entry;
+          entry.dwSize = sizeof(entry);
+          if (Process32FirstW(snap, &entry))
+          {
+            do
+            {
+              if (entry.th32ProcessID == pid)
+              {
+                exists = true;
+                break;
+              }
+            } while (Process32NextW(snap, &entry));
+          }
+          CloseHandle(snap);
+        }
+
+        if (!exists)
+        {
+          // Process not found -> consider it exited
+          return true;
+        }
+
+        // else fallthrough to sleep below
+        Sleep(interval);
+      }
+
+      // If timeoutMs == 0, wait indefinitely
+      if (timeoutMs > 0)
+      {
+        waited += interval;
+        if (waited >= timeoutMs)
+        {
+          return false; // timed out
+        }
+      }
+      // else loop again indefinitely
+    }
+
     return false;
   }
 
@@ -98,6 +185,21 @@ namespace desktop_updater
     GetModuleFileNameW(NULL, executable_path, MAX_PATH);
 
     printf("Executable path: %ls\n", executable_path);
+
+    // If a target PID was provided, wait for it to exit (poll every 1s)
+    if (g_targetPid != 0)
+    {
+      printf("Waiting for process %u to exit (timeout: %u ms)...\n", (unsigned)g_targetPid, (unsigned)g_waitTimeoutMs);
+      bool exited = WaitForProcessExit(g_targetPid, g_waitTimeoutMs);
+      if (!exited)
+      {
+        printf("Timeout waiting for process %u to exit. Proceeding with update anyway.\n", (unsigned)g_targetPid);
+      }
+      else
+      {
+        printf("Process %u exited. Proceeding with update.\n", (unsigned)g_targetPid);
+      }
+    }
 
     // Try to find temp update directory first
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -243,8 +345,14 @@ namespace desktop_updater
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
+    // Prepare arguments: --update-elevated <pid> <timeoutMs>
+    DWORD pid = GetCurrentProcessId();
+    DWORD timeoutMs = g_waitTimeoutMs; // use default
+
+    std::wstring args = L"--update-elevated " + std::to_wstring((unsigned)pid) + L" " + std::to_wstring((unsigned)timeoutMs);
+
     // Use ShellExecuteW with "runas" to request elevation
-    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, L"--update-elevated", NULL, SW_SHOW);
+    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args.c_str(), NULL, SW_SHOW);
 
     if ((INT_PTR)result > 32)
     {
@@ -367,6 +475,25 @@ namespace desktop_updater
     }
     else if (method_call.method_name().compare("restartApp") == 0)
     {
+      // Accept optional timeout argument from Dart (in milliseconds)
+      const auto *args = std::get_if<flutter::EncodableList>(method_call.arguments());
+      if (args && !args->empty())
+      {
+        try
+        {
+          auto val = (*args)[0];
+          if (std::holds_alternative<int64_t>(val))
+          {
+            int64_t ms = std::get<int64_t>(val);
+            if (ms >= 0)
+            {
+              g_waitTimeoutMs = static_cast<DWORD>(ms);
+            }
+          }
+        }
+        catch (...) {}
+      }
+
       RestartApp();
       result->Success();
     }
