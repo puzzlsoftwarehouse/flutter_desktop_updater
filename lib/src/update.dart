@@ -68,7 +68,31 @@ Future<Stream<UpdateProgress>> updateAppFunction({
         return responseStream.stream;
       }
 
-      final downloadPath = await _getDownloadPath(dir);
+      String downloadPath;
+      Directory updateFolder;
+      if (Platform.isMacOS) {
+        final home = Platform.environment['HOME'];
+        final bundleId = await _getBundleIdFromInfoPlist();
+        if (home != null && bundleId != null) {
+          downloadPath = path.join(
+            home,
+            "Library",
+            "Application Support",
+            bundleId,
+            "updates",
+          );
+          updateFolder = Directory(path.join(downloadPath, "update"));
+          if (!await updateFolder.exists()) {
+            await updateFolder.create(recursive: true);
+          }
+        } else {
+          downloadPath = await _getDownloadPath(dir);
+          updateFolder = Directory(path.join(downloadPath, "update"));
+        }
+      } else {
+        downloadPath = await _getDownloadPath(dir);
+        updateFolder = Directory(path.join(downloadPath, "update"));
+      }
       final useTemp = downloadPath != dir.path;
 
       if (useTemp) {
@@ -86,7 +110,6 @@ Future<Stream<UpdateProgress>> updateAppFunction({
       );
 
       final downloadResults = <Map<String, dynamic>>[];
-      final updateFolder = Directory(path.join(dir.path, "update"));
 
       final fileProgress = <String, double>{};
 
@@ -99,6 +122,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
           downloadQueue.add(file);
         }
       }
+      downloadQueue.sort((a, b) => b.length.compareTo(a.length));
       unawaited(
         () async {
           print(
