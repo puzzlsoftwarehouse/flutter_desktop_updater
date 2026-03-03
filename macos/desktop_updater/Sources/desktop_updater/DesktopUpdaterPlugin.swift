@@ -180,6 +180,11 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             exit 1
         fi
 
+        log_message "Stripping inherited code-signing xattrs from clone..."
+        xattr -cr "$TEMP_BUNDLE"
+        log_message "  ✓ xattrs cleared"
+        DEST_DIR="$TEMP_BUNDLE/Contents"
+
         if [ "$IS_DEBUG" = false ]; then
             # Verify signatures of update files
             log_message "Verifying update files signatures..."
@@ -234,12 +239,12 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         fi
         log_message "All files verified successfully"
 
-        # Re-seal the bundle after copying (bundle seal is invalidated when contents change).
-        # Frameworks and executable from the backend are already signed and notarized; we only
-        # need to re-sign the bundle container so its seal matches the new contents.
+        # Re-sign inside-out: codesign requires inner components to be sealed first.
+        # Order: dylibs → frameworks (codesign resolves Versions/A automatically)
+        #        → main executable → outer bundle seal.
+        TEMP_EXECUTABLE="$TEMP_BUNDLE/Contents/MacOS/$(basename "$EXECUTABLE_PATH")"
         if [ "$IS_DEBUG" = false ]; then
-            log_message "Re-signing bundle seal after copy (update files are already signed)..."
-            
+            log_message "Extracting signing identity from original bundle..."
             ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
                 ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
@@ -252,30 +257,42 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
                     ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
                 fi
             fi
-            
             if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
                 log_message "ERROR: Could not determine signing identity from original bundle"
-                log_message "  Attempted to extract from: $APP_BUNDLE_PATH"
                 log_message "  Original team ID: $ORIGINAL_TEAM_ID"
                 codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | head -20 | tee -a "$LOG_FILE" || true
                 rm -rf "$TEMP_DIR"
                 exit 1
             fi
             log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
-            
-            log_message "Re-signing bundle: $TEMP_BUNDLE"
+
+            # Step 1: sign loose dylibs
+            log_message "Signing dylibs..."
+            find "$TEMP_BUNDLE" -name "*.dylib" | while read dylib; do
+                codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$dylib" 2>&1 | tee -a "$LOG_FILE" || true
+            done
+
+            # Step 2: sign each framework individually.
+            # codesign on Foo.framework resolves the Versions/A target automatically,
+            # so we never need to traverse Versions/Current ourselves.
+            log_message "Signing frameworks..."
+            find "$TEMP_BUNDLE/Contents/Frameworks" -maxdepth 1 -name "*.framework" 2>/dev/null | while read fw; do
+                codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$fw" 2>&1 | tee -a "$LOG_FILE" || true
+            done
+
+            # Step 3: sign main executable
+            log_message "Signing executable: $TEMP_EXECUTABLE"
+            codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_EXECUTABLE" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
+
+            # Step 4: seal the outer bundle (must be last)
+            log_message "Signing bundle: $TEMP_BUNDLE"
             if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
                 log_message "  ERROR: Failed to re-sign bundle"
                 rm -rf "$TEMP_DIR"
                 exit 1
             fi
-            log_message "  ✓ Bundle re-signed successfully"
+            log_message "  ✓ Bundle re-signed successfully (inside-out)"
         fi
-        TEMP_EXECUTABLE="$TEMP_BUNDLE/Contents/MacOS/$(basename "$EXECUTABLE_PATH")"
-        if [ -f "$TEMP_EXECUTABLE" ]; then
-            codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_EXECUTABLE" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
-        fi
-        codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
         log_message "Re-signing complete"
 
         # Verify executable permissions in the temporary bundle
