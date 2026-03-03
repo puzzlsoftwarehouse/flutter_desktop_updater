@@ -1,10 +1,45 @@
 import "dart:async";
 import "dart:io";
 
-import "package:desktop_updater/desktop_updater.dart";
+import "package:desktop_updater/src/app_archive.dart";
 import "package:desktop_updater/src/download.dart";
+import "package:desktop_updater/src/update_progress.dart";
+import "package:dio/dio.dart";
 import "package:flutter/material.dart";
 import "package:path/path.dart" as path;
+
+class DownloadCompleteResult {
+  const DownloadCompleteResult({
+    required this.successCount,
+    required this.failedCount,
+    required this.failedFilePaths,
+    required this.cancelled,
+    required this.hadNetworkError,
+    required this.networkErrorFilePaths,
+  });
+
+  final int successCount;
+  final int failedCount;
+  final List<String> failedFilePaths;
+  final bool cancelled;
+  final bool hadNetworkError;
+  final List<String> networkErrorFilePaths;
+
+  bool get hasFailures => failedCount > 0;
+  bool get hasNetworkFailures =>
+      hadNetworkError && networkErrorFilePaths.isNotEmpty;
+}
+
+class UpdateStreamResult {
+  UpdateStreamResult({
+    required this.stream,
+    required this.cancel,
+    required this.whenComplete,
+  });
+  final Stream<UpdateProgress> stream;
+  final void Function() cancel;
+  final Future<DownloadCompleteResult> whenComplete;
+}
 
 Future<bool> _canWriteToDirectory(Directory dir) async {
   try {
@@ -39,9 +74,8 @@ Future<String> _getDownloadPath(Directory targetDir) async {
   return targetDir.path;
 }
 
-/// Modified updateAppFunction to return a stream of UpdateProgress.
-/// The stream emits total kilobytes, received kilobytes, and the currently downloading file's name.
-Future<Stream<UpdateProgress>> updateAppFunction({
+/// Modified updateAppFunction to return a stream of UpdateProgress and a cancel callback.
+Future<UpdateStreamResult> updateAppFunction({
   required String remoteUpdateFolder,
   required List<FileHashModel?> changes,
 }) async {
@@ -59,13 +93,60 @@ Future<Stream<UpdateProgress>> updateAppFunction({
   }
 
   final responseStream = StreamController<UpdateProgress>();
+  final activeCancelTokens = <CancelToken>[];
+  final completeCompleter = Completer<DownloadCompleteResult>();
+  var cancelled = false;
+  Timer? summaryTimer;
+  Timer? periodicLogTimer;
+
+  void cancelDownloads() {
+    if (cancelled) return;
+    cancelled = true;
+    summaryTimer?.cancel();
+    summaryTimer = null;
+    periodicLogTimer?.cancel();
+    periodicLogTimer = null;
+    for (final token in List<CancelToken>.from(activeCancelTokens)) {
+      token.cancel("Download cancelled");
+    }
+    if (!completeCompleter.isCompleted) {
+      completeCompleter.complete(DownloadCompleteResult(
+        successCount: 0,
+        failedCount: 0,
+        failedFilePaths: [],
+        cancelled: true,
+        hadNetworkError: false,
+        networkErrorFilePaths: [],
+      ));
+    }
+    if (!responseStream.isClosed) {
+      responseStream.close();
+    }
+    FileDownloader.reset();
+  }
+
+  final result = UpdateStreamResult(
+    stream: responseStream.stream,
+    cancel: cancelDownloads,
+    whenComplete: completeCompleter.future,
+  );
 
   try {
     if (await dir.exists()) {
       if (changes.isEmpty) {
         debugPrint("No updates required.");
+        if (!completeCompleter.isCompleted) {
+          completeCompleter.complete(const DownloadCompleteResult(
+            successCount: 0,
+            failedCount: 0,
+            failedFilePaths: [],
+            cancelled: false,
+            hadNetworkError: false,
+            networkErrorFilePaths: [],
+          ));
+        }
         await responseStream.close();
-        return responseStream.stream;
+        return result;
       }
 
       String downloadPath;
@@ -96,7 +177,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
       final useTemp = downloadPath != dir.path;
 
       if (useTemp) {
-        debugPrint("Usando pasta temp para download: $downloadPath");
+        debugPrint("Using temp folder for download: $downloadPath");
       }
 
       var receivedBytes = 0.0;
@@ -113,7 +194,7 @@ Future<Stream<UpdateProgress>> updateAppFunction({
 
       final fileProgress = <String, double>{};
 
-      const maxConcurrentDownloads = 100;
+      const maxConcurrentDownloads = 64;
       final activeDownloads = <Completer<void>>[];
       final downloadQueue = <FileHashModel>[];
 
@@ -123,291 +204,443 @@ Future<Stream<UpdateProgress>> updateAppFunction({
         }
       }
       downloadQueue.sort((a, b) => b.length.compareTo(a.length));
+
+      final dirsToCreate = <String>{};
+      for (final file in downloadQueue) {
+        dirsToCreate.add(
+            path.dirname(path.join(downloadPath, "update", file.filePath)));
+      }
+      for (final dirPath in dirsToCreate) {
+        final d = Directory(dirPath);
+        if (!await d.exists()) {
+          await d.create(recursive: true);
+        }
+      }
+
+      var lastProgressEmit = DateTime.now();
+      const progressThrottleMs = 80;
+
       unawaited(
         () async {
-          print(
-              "Starting download process: ${downloadQueue.length} files in queue");
-          Directory? logDir;
-          String? logFileName;
-          Timer? periodicLogTimer;
+          try {
+            final downloadStartTime = DateTime.now();
+            Directory? logDir;
+            String? logFileName;
+            const summaryInterval = Duration(seconds: 5);
 
-          if (Platform.isMacOS) {
-            final appSupportDir = Platform.environment['HOME'];
-            if (appSupportDir != null) {
-              final bundleId = await _getBundleIdFromInfoPlist();
-              if (bundleId != null) {
-                logDir = Directory(
-                  path.join(
-                    appSupportDir,
-                    "Library",
-                    "Application Support",
-                    bundleId,
-                    "logs",
-                  ),
-                );
-                if (!await logDir.exists()) {
-                  await logDir.create(recursive: true);
+            void printSummary() {
+              if (cancelled) return;
+              final ok =
+                  downloadResults.where((r) => r["status"] == "success").length;
+              final failed =
+                  downloadResults.where((r) => r["status"] == "failed").length;
+              final pct =
+                  totalFiles > 0 ? (ok + failed) / totalFiles * 100 : 0.0;
+              final receivedMb = (receivedBytes * 1024).toInt();
+              final totalMb = (totalLengthKB * 1024).toInt();
+              print(
+                "[Update] $ok/$totalFiles files (${pct.toStringAsFixed(0)}%), "
+                "$failed failed, ${_formatBytes(receivedMb)} / ${_formatBytes(totalMb)}");
+            }
+
+            summaryTimer = Timer.periodic(summaryInterval, (_) {
+              if (cancelled || responseStream.isClosed) return;
+              printSummary();
+            });
+
+            if (Platform.isMacOS) {
+              final appSupportDir = Platform.environment['HOME'];
+              if (appSupportDir != null) {
+                final bundleId = await _getBundleIdFromInfoPlist();
+                if (bundleId != null) {
+                  logDir = Directory(
+                    path.join(
+                      appSupportDir,
+                      "Library",
+                      "Application Support",
+                      bundleId,
+                      "logs",
+                    ),
+                  );
+                  if (!await logDir.exists()) {
+                    await logDir.create(recursive: true);
+                  }
                 }
               }
             }
-          }
-          if (logDir == null || !await logDir.exists()) {
-            logDir = updateFolder;
-          }
-
-          final timestamp = DateTime.now();
-          logFileName = "download_${timestamp.millisecondsSinceEpoch}.log";
-
-          // Create initial log file
-          try {
-            final logFile = File(path.join(logDir.path, logFileName));
-            final initialSink = logFile.openWrite()
-              ..writeln("=" * 80)
-              ..writeln("DOWNLOAD LOG - ${timestamp.toIso8601String()}")
-              ..writeln("=" * 80)
-              ..writeln("")
-              ..writeln("INITIAL STATUS:")
-              ..writeln("  Remote folder: $remoteUpdateFolder")
-              ..writeln("  Update folder: ${updateFolder.path}")
-              ..writeln("  Total files: $totalFiles")
-              ..writeln(
-                  "  Total size: ${_formatBytes((totalLengthKB * 1024).toInt())}")
-              ..writeln("  Started at: ${timestamp.toIso8601String()}")
-              ..writeln("")
-              ..writeln("Periodic updates will be appended every 10 seconds...")
-              ..writeln("");
-            await initialSink.close();
-            print("Download log initialized: ${logFile.path}");
-          } catch (e) {
-            print("Warning: Could not create initial log file: $e");
-          }
-
-          // Function to save log periodically
-          Future<void> savePeriodicLog() async {
-            try {
-              await _saveDownloadLogPeriodic(
-                logDir: logDir!,
-                logFileName: logFileName!,
-                updateFolder: updateFolder,
-                downloadResults: downloadResults,
-                remoteUpdateFolder: remoteUpdateFolder,
-                totalFiles: totalFiles,
-                receivedBytes: receivedBytes,
-                totalLengthKB: totalLengthKB,
-              );
-            } catch (e) {
-              print("Error saving periodic log: $e");
+            if (logDir == null || !await logDir.exists()) {
+              logDir = updateFolder;
             }
-          }
 
-          // Start periodic log saving every 10 seconds
-          periodicLogTimer = Timer.periodic(Duration(seconds: 10), (_) {
-            unawaited(savePeriodicLog());
-          });
+            final timestamp = DateTime.now();
+            logFileName = "download_${timestamp.millisecondsSinceEpoch}.log";
 
-          while (downloadQueue.isNotEmpty || activeDownloads.isNotEmpty) {
-            while (activeDownloads.length < maxConcurrentDownloads &&
-                downloadQueue.isNotEmpty) {
-              final file = downloadQueue.removeAt(0);
-              print(
-                  "Starting download: ${file.filePath} (${activeDownloads.length + 1}/$maxConcurrentDownloads active)");
+            // Create initial log file
+            try {
+              final logFile = File(path.join(logDir.path, logFileName));
+              final initialSink = logFile.openWrite()
+                ..writeln("=" * 80)
+                ..writeln("DOWNLOAD LOG - ${timestamp.toIso8601String()}")
+                ..writeln("=" * 80)
+                ..writeln("")
+                ..writeln("INITIAL STATUS:")
+                ..writeln("  Remote folder: $remoteUpdateFolder")
+                ..writeln("  Update folder: ${updateFolder.path}")
+                ..writeln("  Total files: $totalFiles")
+                ..writeln(
+                    "  Total size: ${_formatBytes((totalLengthKB * 1024).toInt())}")
+                ..writeln("  Started at: ${timestamp.toIso8601String()}")
+                ..writeln("")
+                ..writeln(
+                    "Periodic updates will be appended every 10 seconds...")
+                ..writeln("");
+              await initialSink.close();
+              debugPrint("Download log: ${logFile.path}");
+            } catch (e) {
+              debugPrint("Warning: Could not create initial log file: $e");
+            }
 
-              if (activeDownloads.isNotEmpty) {
-                await Future.delayed(Duration(milliseconds: 100));
+            Future<void> savePeriodicLog() async {
+              if (cancelled) return;
+              try {
+                await _saveDownloadLogPeriodic(
+                  logDir: logDir!,
+                  logFileName: logFileName!,
+                  updateFolder: updateFolder,
+                  downloadResults: downloadResults,
+                  remoteUpdateFolder: remoteUpdateFolder,
+                  totalFiles: totalFiles,
+                  receivedBytes: receivedBytes,
+                  totalLengthKB: totalLengthKB,
+                  getCancelled: () => cancelled,
+                );
+              } catch (e) {
+                if (!cancelled) debugPrint("Error saving periodic log: $e");
               }
+            }
 
-              final startTime = DateTime.now();
+            // Start periodic log saving every 10 seconds
+            periodicLogTimer = Timer.periodic(Duration(seconds: 10), (_) {
+              if (cancelled) return;
+              unawaited(savePeriodicLog());
+            });
 
-              final completer = Completer<void>();
-              activeDownloads.add(completer);
+            while (downloadQueue.isNotEmpty || activeDownloads.isNotEmpty) {
+              if (cancelled) break;
 
-              fileProgress[file.filePath] = 0.0;
+              while (activeDownloads.length < maxConcurrentDownloads &&
+                  downloadQueue.isNotEmpty &&
+                  !cancelled) {
+                final file = downloadQueue.removeAt(0);
+                final startTime = DateTime.now();
+                final cancelToken = CancelToken();
+                activeCancelTokens.add(cancelToken);
 
-              final downloader = FileDownloader();
-              downloader.downloadFile(
-                remoteUpdateFolder,
-                file.filePath,
-                downloadPath,
-                (received, total) {
-                  final lastReceived = fileProgress[file.filePath] ?? 0.0;
-                  final increment = received - lastReceived;
-                  if (increment > 0) {
-                    receivedBytes += increment;
-                    fileProgress[file.filePath] = received;
+                final completer = Completer<void>();
+                activeDownloads.add(completer);
+
+                fileProgress[file.filePath] = 0.0;
+
+                final downloader = FileDownloader();
+                downloader.downloadFile(
+                  remoteUpdateFolder,
+                  file.filePath,
+                  downloadPath,
+                  (received, total) {
+                    try {
+                      if (cancelled || responseStream.isClosed) return;
+                      final lastReceived = fileProgress[file.filePath] ?? 0.0;
+                      final increment = received - lastReceived;
+                      if (increment > 0) {
+                        receivedBytes += increment;
+                        fileProgress[file.filePath] = received;
+                      }
+                      final now = DateTime.now();
+                      if (now.difference(lastProgressEmit).inMilliseconds >=
+                          progressThrottleMs) {
+                        lastProgressEmit = now;
+                        if (!cancelled && !responseStream.isClosed) {
+                          responseStream.add(
+                            UpdateProgress(
+                              totalBytes: totalLengthKB,
+                              receivedBytes: receivedBytes,
+                              currentFile: file.filePath,
+                              totalFiles: totalFiles,
+                              completedFiles: completedFiles,
+                            ),
+                          );
+                        }
+                      }
+                    } catch (_) {}
+                  },
+                  cancelToken: cancelToken,
+                ).then((_) async {
+                  if (cancelled) {
+                    activeCancelTokens.remove(cancelToken);
+                    activeDownloads.remove(completer);
+                    if (!completer.isCompleted) completer.complete();
+                    return;
                   }
+                  try {
+                    completedFiles += 1;
 
-                  responseStream.add(
-                    UpdateProgress(
-                      totalBytes: totalLengthKB,
-                      receivedBytes: receivedBytes,
-                      currentFile: file.filePath,
-                      totalFiles: totalFiles,
-                      completedFiles: completedFiles,
-                    ),
-                  );
-                },
-              ).then((_) async {
-                try {
-                  completedFiles += 1;
+                    final fileSizeKB = file.length / 1024.0;
+                    final lastReported = fileProgress[file.filePath] ?? 0.0;
+                    final remaining = fileSizeKB - lastReported;
 
-                  final fileSizeKB = file.length / 1024.0;
-                  final lastReported = fileProgress[file.filePath] ?? 0.0;
-                  final remaining = fileSizeKB - lastReported;
+                    if (remaining > 0) {
+                      receivedBytes += remaining;
+                      fileProgress[file.filePath] = fileSizeKB;
+                    }
 
-                  if (remaining > 0) {
-                    receivedBytes += remaining;
-                    fileProgress[file.filePath] = fileSizeKB;
+                    final endTime = DateTime.now();
+                    final duration = endTime.difference(startTime);
+
+                    final fullPath =
+                        path.join(updateFolder.path, file.filePath);
+                    final downloadedFile = File(fullPath);
+                    int fileSize = 0;
+                    bool fileExists = false;
+
+                    try {
+                      if (await downloadedFile.exists()) {
+                        fileExists = true;
+                        fileSize = await downloadedFile.length();
+                      }
+                    } catch (e) {
+                      // Ignore errors getting file size
+                    }
+
+                    downloadResults.add({
+                      "file": file.filePath,
+                      "status": "success",
+                      "size": fileSize,
+                      "expectedSize": file.length,
+                      "duration": duration.inMilliseconds,
+                      "startTime": startTime.toIso8601String(),
+                      "endTime": endTime.toIso8601String(),
+                      "exists": fileExists,
+                    });
+
+                    if (!cancelled && !responseStream.isClosed) {
+                      responseStream.add(
+                        UpdateProgress(
+                          totalBytes: totalLengthKB,
+                          receivedBytes: receivedBytes,
+                          currentFile: file.filePath,
+                          totalFiles: totalFiles,
+                          completedFiles: completedFiles,
+                        ),
+                      );
+                    }
+                  } finally {
+                    activeCancelTokens.remove(cancelToken);
+                    activeDownloads.remove(completer);
+                    if (!completer.isCompleted) {
+                      completer.complete();
+                    }
                   }
-
+                }).catchError((error, stackTrace) {
+                  if (cancelled) {
+                    activeCancelTokens.remove(cancelToken);
+                    activeDownloads.remove(completer);
+                    if (!completer.isCompleted) completer.complete();
+                    return;
+                  }
                   final endTime = DateTime.now();
                   final duration = endTime.difference(startTime);
-
-                  final fullPath = path.join(updateFolder.path, file.filePath);
-                  final downloadedFile = File(fullPath);
-                  int fileSize = 0;
-                  bool fileExists = false;
-
-                  try {
-                    if (await downloadedFile.exists()) {
-                      fileExists = true;
-                      fileSize = await downloadedFile.length();
-                    }
-                  } catch (e) {
-                    // Ignore errors getting file size
-                  }
+                  final isNetwork = FileDownloader.isNetworkErrorString(error.toString());
 
                   downloadResults.add({
                     "file": file.filePath,
-                    "status": "success",
-                    "size": fileSize,
+                    "status": "failed",
+                    "size": 0,
                     "expectedSize": file.length,
                     "duration": duration.inMilliseconds,
                     "startTime": startTime.toIso8601String(),
                     "endTime": endTime.toIso8601String(),
-                    "exists": fileExists,
+                    "error": error.toString(),
+                    "exists": false,
+                    "networkError": isNetwork,
                   });
 
-                  responseStream.add(
-                    UpdateProgress(
-                      totalBytes: totalLengthKB,
-                      receivedBytes: receivedBytes,
-                      currentFile: file.filePath,
-                      totalFiles: totalFiles,
-                      completedFiles: completedFiles,
-                    ),
-                  );
-                  debugPrint("Completed: ${file.filePath}");
-                } finally {
+                  if (isNetwork) {
+                    cancelled = true;
+                    summaryTimer?.cancel();
+                    summaryTimer = null;
+                    periodicLogTimer?.cancel();
+                    periodicLogTimer = null;
+                    for (final t
+                        in List<CancelToken>.from(activeCancelTokens)) {
+                      t.cancel("Network error");
+                    }
+                    if (!completeCompleter.isCompleted) {
+                      final ok = downloadResults
+                          .where((r) => r["status"] == "success")
+                          .length;
+                      final failed = downloadResults
+                          .where((r) => r["status"] == "failed")
+                          .length;
+                      final failedPaths = downloadResults
+                          .where((r) => r["status"] == "failed")
+                          .map<String>((r) => r["file"] as String)
+                          .toList();
+                      final networkPaths = downloadResults
+                          .where((r) =>
+                              r["status"] == "failed" &&
+                              (r["networkError"] == true))
+                          .map<String>((r) => r["file"] as String)
+                          .toList();
+                      completeCompleter.complete(DownloadCompleteResult(
+                        successCount: ok,
+                        failedCount: failed,
+                        failedFilePaths: failedPaths,
+                        cancelled: false,
+                        hadNetworkError: true,
+                        networkErrorFilePaths: networkPaths,
+                      ));
+                    }
+                    if (!responseStream.isClosed) {
+                      responseStream.addError(
+                        Exception(
+                            "No connection / network error. Download aborted.\n  $error"),
+                        stackTrace,
+                      );
+                      responseStream.close();
+                    }
+                    FileDownloader.reset();
+                  } else if (!responseStream.isClosed) {
+                    responseStream.addError(
+                      Exception("Failed to download update file:\n"
+                          "  File: ${file.filePath}\n"
+                          "  Remote folder: $remoteUpdateFolder\n"
+                          "  Error: $error"),
+                      stackTrace,
+                    );
+                  }
+
+                  activeCancelTokens.remove(cancelToken);
                   activeDownloads.remove(completer);
                   if (!completer.isCompleted) {
                     completer.complete();
                   }
-                }
-              }).catchError((error, stackTrace) {
-                final endTime = DateTime.now();
-                final duration = endTime.difference(startTime);
-
-                final errorString = error.toString();
-                int retryAttempts = 3;
-                bool hasRetryInfo = false;
-
-                if (errorString.contains('Retry attempts:')) {
-                  final retryMatch =
-                      RegExp(r'Retry attempts: (\d+)').firstMatch(errorString);
-                  if (retryMatch != null) {
-                    retryAttempts =
-                        int.tryParse(retryMatch.group(1) ?? '3') ?? 3;
-                    hasRetryInfo = true;
-                  }
-                }
-
-                downloadResults.add({
-                  "file": file.filePath,
-                  "status": "failed",
-                  "size": 0,
-                  "expectedSize": file.length,
-                  "duration": duration.inMilliseconds,
-                  "startTime": startTime.toIso8601String(),
-                  "endTime": endTime.toIso8601String(),
-                  "error": error.toString(),
-                  "exists": false,
-                  "retryAttempts": retryAttempts,
-                  "hadRetries": hasRetryInfo,
                 });
-
-                print("ERROR: Failed to download file: ${file.filePath}");
-                print("  Error: $error");
-                print("  Stack trace: $stackTrace");
-                responseStream.addError(
-                  Exception("Failed to download update file:\n"
-                      "  File: ${file.filePath}\n"
-                      "  Remote folder: $remoteUpdateFolder\n"
-                      "  Error: $error"),
-                  stackTrace,
-                );
-
-                activeDownloads.remove(completer);
-                if (!completer.isCompleted) {
-                  completer.complete();
-                }
-              });
-            }
-
-            if (activeDownloads.isNotEmpty) {
-              final futures = activeDownloads.map((c) => c.future).toList();
-              if (futures.isNotEmpty) {
-                print(
-                    "Waiting for ${futures.length} active downloads to complete...");
-                await Future.any(futures);
-                print(
-                    "At least one download completed. Active: ${activeDownloads.length}, Queue: ${downloadQueue.length}");
               }
-              await Future.delayed(Duration(milliseconds: 10));
-            } else if (downloadQueue.isNotEmpty) {
-              print(
-                  "Warning: Queue not empty but no active downloads. Queue: ${downloadQueue.length}");
-              await Future.delayed(Duration(milliseconds: 50));
-            } else {
-              print("All downloads completed!");
-              break;
+
+              if (activeDownloads.isNotEmpty) {
+                final futures = activeDownloads.map((c) => c.future).toList();
+                if (futures.isNotEmpty) {
+                  await Future.any(futures);
+                }
+                await Future.delayed(Duration.zero);
+              } else if (downloadQueue.isNotEmpty) {
+                await Future.delayed(Duration(milliseconds: 50));
+              } else {
+                break;
+              }
             }
+
+            summaryTimer?.cancel();
+            summaryTimer = null;
+            periodicLogTimer?.cancel();
+            periodicLogTimer = null;
+
+            final ok =
+                downloadResults.where((r) => r["status"] == "success").length;
+            final failed =
+                downloadResults.where((r) => r["status"] == "failed").length;
+            final failedPaths = downloadResults
+                .where((r) => r["status"] == "failed")
+                .map<String>((r) => r["file"] as String)
+                .toList();
+            final networkErrorPaths = downloadResults
+                .where((r) =>
+                    r["status"] == "failed" && (r["networkError"] == true))
+                .map<String>((r) => r["file"] as String)
+                .toList();
+
+            if (!completeCompleter.isCompleted) {
+              completeCompleter.complete(DownloadCompleteResult(
+                successCount: ok,
+                failedCount: failed,
+                failedFilePaths: failedPaths,
+                cancelled: cancelled,
+                hadNetworkError: networkErrorPaths.isNotEmpty,
+                networkErrorFilePaths: networkErrorPaths,
+              ));
+            }
+
+            if (!cancelled) {
+              final elapsed = DateTime.now().difference(downloadStartTime);
+              final totalMb = (totalLengthKB * 1024).toInt();
+              print("[Update] Completed: $ok success, $failed failed, "
+                  "${_formatBytes(totalMb)} in ${_formatDuration(elapsed)}");
+              if (failed > 0) {
+                print("[Update] Failure details at: ${logDir.path}");
+              }
+              await _saveDownloadLog(
+                updateFolder: updateFolder,
+                downloadResults: downloadResults,
+                remoteUpdateFolder: remoteUpdateFolder,
+                totalFiles: totalFiles,
+              );
+            }
+
+            if (!responseStream.isClosed) {
+              await responseStream.close();
+            }
+          } catch (e, st) {
+            if (cancelled) return;
+            if (!completeCompleter.isCompleted) {
+              completeCompleter.complete(DownloadCompleteResult(
+                successCount: 0,
+                failedCount: 0,
+                failedFilePaths: [],
+                cancelled: false,
+                hadNetworkError: FileDownloader.isNetworkErrorString(e.toString()),
+                networkErrorFilePaths: [],
+              ));
+            }
+            if (!responseStream.isClosed) {
+              responseStream.addError(Exception("Update error: $e"), st);
+              responseStream.close();
+            }
+            summaryTimer?.cancel();
+            summaryTimer = null;
+            periodicLogTimer?.cancel();
+            periodicLogTimer = null;
+            FileDownloader.reset();
           }
-
-          periodicLogTimer.cancel();
-
-          await _saveDownloadLog(
-            updateFolder: updateFolder,
-            downloadResults: downloadResults,
-            remoteUpdateFolder: remoteUpdateFolder,
-            totalFiles: totalFiles,
-          );
-
-          await responseStream.close();
         }(),
       );
 
-      return responseStream.stream;
+      return result;
     }
   } catch (e, stackTrace) {
-    print("ERROR: Failed to initialize update process");
-    print("  Executable path: $executablePath");
-    print("  Directory path: ${dir.path}");
-    print("  Remote update folder: $remoteUpdateFolder");
-    print("  Number of files to update: ${changes.length}");
-    print("  Error: $e");
-    print("  Stack trace: $stackTrace");
-    responseStream.addError(
-      Exception("Failed to initialize update process:\n"
-          "  Directory: ${dir.path}\n"
-          "  Remote folder: $remoteUpdateFolder\n"
-          "  Files to update: ${changes.length}\n"
-          "  Error: $e"),
-      stackTrace,
-    );
-    await responseStream.close();
+    if (!completeCompleter.isCompleted) {
+      completeCompleter.complete(DownloadCompleteResult(
+        successCount: 0,
+        failedCount: 0,
+        failedFilePaths: [],
+        cancelled: true,
+        hadNetworkError: FileDownloader.isNetworkErrorString(e.toString()),
+        networkErrorFilePaths: [],
+      ));
+    }
+    if (!responseStream.isClosed) {
+      responseStream.addError(
+        Exception("Failed to initialize update process:\n"
+            "  Directory: ${dir.path}\n"
+            "  Remote folder: $remoteUpdateFolder\n"
+            "  Files to update: ${changes.length}\n"
+            "  Error: $e"),
+        stackTrace,
+      );
+      await responseStream.close();
+    }
   }
 
-  return responseStream.stream;
+  return result;
 }
 
 /// Saves a periodic snapshot of the download progress (called every 10 seconds)
@@ -420,7 +653,9 @@ Future<void> _saveDownloadLogPeriodic({
   required int totalFiles,
   required double receivedBytes,
   required double totalLengthKB,
+  bool Function()? getCancelled,
 }) async {
+  if (getCancelled?.call() ?? false) return;
   try {
     final timestamp = DateTime.now();
     final logFile = File(path.join(logDir.path, logFileName));
@@ -470,14 +705,8 @@ Future<void> _saveDownloadLogPeriodic({
       for (final result in recentFailures) {
         final file = result["file"] as String;
         final error = result["error"] as String? ?? "Unknown error";
-        final retryAttempts = result["retryAttempts"] as int? ?? 0;
-        final hadRetries = result["hadRetries"] as bool? ?? false;
         sink.writeln("  File: $file");
-        if (hadRetries && retryAttempts > 0) {
-          sink.writeln("    Retry attempts: $retryAttempts (all failed)");
-        }
-        sink.writeln(
-            "    Error: ${error.split('\n').first}"); // First line only
+        sink.writeln("    Error: ${error.split('\n').first}");
         sink.writeln("");
       }
     }
@@ -486,10 +715,11 @@ Future<void> _saveDownloadLogPeriodic({
     sink.writeln("");
 
     await sink.close();
-    print(
-        "Periodic log saved: $progressPercent% complete, $successful/$totalFiles files");
+    if (getCancelled?.call() ?? false) return;
+    debugPrint("Periodic log: $progressPercent%");
   } catch (e) {
-    print("ERROR: Failed to save periodic log: $e");
+    if (getCancelled?.call() ?? false) return;
+    debugPrint("Error saving periodic log: $e");
   }
 }
 
@@ -613,16 +843,11 @@ Future<void> _saveDownloadLog({
         final error = result["error"] as String? ?? "Unknown error";
         final startTime = result["startTime"] as String;
         final endTime = result["endTime"] as String;
-        final retryAttempts = result["retryAttempts"] as int? ?? 0;
-        final hadRetries = result["hadRetries"] as bool? ?? false;
 
         sink.writeln("  File: $file");
         sink.writeln("    Status: FAILED ✗");
         sink.writeln("    Expected size: ${_formatBytes(expectedSize)}");
         sink.writeln("    Duration: ${_formatDuration(duration)}");
-        if (hadRetries && retryAttempts > 0) {
-          sink.writeln("    Retry attempts: $retryAttempts (all failed)");
-        }
         sink.writeln("    Start: $startTime");
         sink.writeln("    End: $endTime");
         sink.writeln("    Error: $error");
@@ -647,16 +872,9 @@ Future<void> _saveDownloadLog({
 
     await sink.close();
 
-    print("Download log saved to: ${logFile.path}");
-    print(
-        "Summary: $successful/$totalFiles successful, ${_formatBytes(totalSize)} downloaded");
-    if (failed > 0) {
-      print(
-          "Warning: $failed file(s) failed to download. See log for details.");
-    }
-  } catch (e, stackTrace) {
-    print("ERROR: Failed to save download log: $e");
-    print("Stack trace: $stackTrace");
+    debugPrint("Download log: ${logFile.path}");
+  } catch (e) {
+    debugPrint("Error saving download log: $e");
   }
 }
 
@@ -686,7 +904,7 @@ Future<String?> _getBundleIdFromInfoPlist() async {
       }
     }
   } catch (e) {
-    print("Warning: Could not read Info.plist: $e");
+    debugPrint("Warning: Could not read Info.plist: $e");
   }
 
   return null;

@@ -208,6 +208,16 @@ class UpdateCardState extends State<UpdateCard> {
                                     ),
                                     onPressed: null,
                                   ),
+                                  const SizedBox(width: 8),
+                                  OutlinedButton.icon(
+                                    icon: const Icon(Icons.cancel_outlined),
+                                    label: Text(
+                                      notifier?.getLocalization
+                                              ?.cancelDownloadText ??
+                                          "Cancel",
+                                    ),
+                                    onPressed: notifier?.cancelDownload,
+                                  ),
                                 ],
                               )
                             else if (notifier?.isDownloading == false &&

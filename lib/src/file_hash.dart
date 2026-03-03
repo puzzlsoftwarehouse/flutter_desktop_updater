@@ -9,14 +9,13 @@ import "package:flutter/material.dart";
 
 Future<String> getFileHash(File file) async {
   try {
-    // Dosya içeriğini okuyun
+    // Read file content
     final List<int> fileBytes = await file.readAsBytes();
 
-    // blake2s algoritmasıyla hash hesaplayın
-
+    // Compute hash with Blake2b algorithm
     final hash = await Blake2b().hash(fileBytes);
 
-    // Hash'i utf-8 base64'e dönüştürün ve geri döndürün
+    // Encode hash to base64 and return
     return base64.encode(hash.bytes);
   } catch (e) {
     debugPrint("Error reading file ${file.path}: $e");
@@ -76,7 +75,7 @@ Future<List<FileHashModel?>> verifyFileHashes(
   return changes;
 }
 
-// Dizin içindeki tüm dosyaların hash'lerini alıp bir dosyaya yazan fonksiyon
+// Computes hashes of all files in a directory and writes them to a file
 Future<String> genFileHashes({String? path}) async {
   path ??= Platform.resolvedExecutable;
 
@@ -89,31 +88,30 @@ Future<String> genFileHashes({String? path}) async {
     dir = dir.parent;
   }
 
-  // Eğer belirtilen yol bir dizinse
+  // If the given path is a directory
   if (await dir.exists()) {
-    // temp dizini oluşturulur
+    // Create temp directory
     final tempDir = await Directory.systemTemp.createTemp("desktop_updater");
 
-    // temp dizinindeki dosyaları kopyala
-    // dir + output.txt dosyası oluşturulur
+    // Create output file in temp dir
     final outputFile =
         File("${tempDir.path}${Platform.pathSeparator}hashes.json");
 
-    // Çıktı dosyasını açıyoruz
+    // Open output file for writing
     final sink = outputFile.openWrite();
 
     // ignore: prefer_final_locals
     var hashList = <FileHashModel>[];
 
-    // Dizin içindeki tüm dosyaları döngüyle okuyoruz
+    // Iterate over all files in the directory
     await for (final entity in dir.list(recursive: true, followLinks: false)) {
       if (entity is File) {
-        // Dosyanın hash'ini al
+        // Get file hash
         final hash = await getFileHash(entity);
 
         final foundPath = entity.path.substring(dir.path.length + 1);
 
-        // Dosya yolunu ve hash değerini yaz
+        // Add file path and hash to list
         if (hash.isNotEmpty) {
           final hashObj = FileHashModel(
             filePath: foundPath,
@@ -125,13 +123,13 @@ Future<String> genFileHashes({String? path}) async {
       }
     }
 
-    // Dosya hash'lerini json formatına çevir
+    // Convert file hashes to JSON format
     final jsonStr = jsonEncode(hashList);
 
-    // Çıktı dosyasına yaz
+    // Write to output file
     sink.write(jsonStr);
 
-    // Çıktıyı kaydediyoruz
+    // Flush and close output
     await sink.close();
     return outputFile.path;
   } else {

@@ -21,6 +21,7 @@ class DesktopUpdateLocalization {
     this.warningConfirmText,
     this.skipThisVersionText,
     this.downloadText,
+    this.cancelDownloadText,
   });
 
   /// Default: "Update available"
@@ -56,6 +57,9 @@ class DesktopUpdateLocalization {
 
   /// Default: "Download"
   final String? downloadText;
+
+  /// Default: "Cancel"
+  final String? cancelDownloadText;
 }
 
 String? getLocalizedString(String? key, List<dynamic> args) {

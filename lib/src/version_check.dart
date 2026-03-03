@@ -22,7 +22,7 @@ Future<ItemModel?> versionCheckFunction({
     dir = dir.parent;
   }
 
-  // Eğer belirtilen yol bir dizinse
+  // If the given path is a directory
   if (await dir.exists()) {
     final tempDir = await Directory.systemTemp.createTemp("desktop_updater");
     final client = http.Client();
@@ -30,12 +30,11 @@ Future<ItemModel?> versionCheckFunction({
     final appArchive = http.Request("GET", Uri.parse(appArchiveUrl));
     final appArchiveResponse = await client.send(appArchive);
 
-    // temp dizinindeki dosyaları kopyala
-    // dir + output.txt dosyası oluşturulur
+    // Create output file in temp dir
     final outputFile =
         File("${tempDir.path}${Platform.pathSeparator}app-archive.json");
 
-    // Çıktı dosyasını açıyoruz
+    // Open output file for writing
     final sink = outputFile.openWrite();
 
     // Save the file

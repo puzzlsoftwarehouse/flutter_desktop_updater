@@ -59,6 +59,11 @@ class DesktopUpdaterController extends ChangeNotifier {
 
   final _plugin = DesktopUpdater();
 
+  UpdateStreamResult? _updateStreamResult;
+
+  DownloadCompleteResult? _lastDownloadResult;
+  DownloadCompleteResult? get lastDownloadResult => _lastDownloadResult;
+
   Future<void> init(Uri url) async {
     _appArchiveUrl = url;
     await checkVersion();
@@ -112,29 +117,26 @@ class DesktopUpdaterController extends ChangeNotifier {
       throw Exception("Folder URL is not set");
     }
 
-    if (_changedFiles == null && _changedFiles!.isEmpty) {
+    if (_changedFiles == null || _changedFiles!.isEmpty) {
       throw Exception("Changed files are not set");
     }
 
-    final stream = await _plugin.updateApp(
+    final updateResult = await _plugin.updateApp(
       remoteUpdateFolder: _folderUrl!,
       changedFiles: _changedFiles ?? [],
     );
 
-    stream.listen(
+    _updateStreamResult = updateResult;
+    _lastDownloadResult = null;
+
+    updateResult.whenComplete.then((result) {
+      _lastDownloadResult = result;
+      notifyListeners();
+    });
+
+    updateResult.stream.listen(
       (event) {
         _updateProgress = event;
-
-        // if (_downloadProgress >= 1.0) {
-        //   _isDownloading = false;
-        //   _downloadProgress = 1.0;
-        //   _downloadedSize = _downloadSize;
-        //   _isDownloaded = true;
-
-        //   notifyListeners();
-        //   return;
-        // }
-
         _isDownloading = true;
         _isDownloaded = false;
         _downloadProgress = event.receivedBytes / event.totalBytes;
@@ -146,10 +148,25 @@ class DesktopUpdaterController extends ChangeNotifier {
         _downloadProgress = 1.0;
         _downloadedSize = _downloadSize;
         _isDownloaded = true;
-
+        _updateStreamResult = null;
         notifyListeners();
       },
+      onError: (_) {
+        _isDownloading = false;
+        _updateStreamResult = null;
+        notifyListeners();
+      },
+      cancelOnError: false,
     );
+  }
+
+  void cancelDownload() {
+    if (_updateStreamResult != null) {
+      _updateStreamResult!.cancel();
+      _updateStreamResult = null;
+      _isDownloading = false;
+      notifyListeners();
+    }
   }
 
   void restartApp() {
