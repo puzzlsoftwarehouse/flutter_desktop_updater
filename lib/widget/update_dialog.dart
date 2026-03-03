@@ -233,6 +233,15 @@ class UpdateDialogWidget extends StatelessWidget {
                         ),
                         onPressed: null,
                       ),
+                      const SizedBox(width: 8),
+                      TextButton.icon(
+                        icon: Icon(Icons.cancel_outlined, color: buttonIconColor),
+                        label: Text(
+                          notifier.getLocalization?.cancelDownloadText ?? "Cancel",
+                          style: TextStyle(color: buttonTextColor),
+                        ),
+                        onPressed: notifier.cancelDownload,
+                      ),
                     ],
                   )
                 else if (notifier.isDownloading == false &&

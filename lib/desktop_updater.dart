@@ -3,11 +3,11 @@ import "package:desktop_updater/src/app_archive.dart";
 import "package:desktop_updater/src/file_hash.dart";
 import "package:desktop_updater/src/prepare.dart";
 import "package:desktop_updater/src/update.dart";
-import "package:desktop_updater/src/update_progress.dart";
 import "package:desktop_updater/src/version_check.dart";
 
 export "package:desktop_updater/src/app_archive.dart";
 export "package:desktop_updater/src/localization.dart";
+export "package:desktop_updater/src/update.dart" show DownloadCompleteResult, UpdateStreamResult;
 export "package:desktop_updater/src/update_progress.dart";
 export "package:desktop_updater/widget/update_dialog.dart";
 export "package:desktop_updater/widget/update_direct_card.dart";
@@ -45,7 +45,7 @@ class DesktopUpdater {
     return genFileHashes(path: path);
   }
 
-  Future<Stream<UpdateProgress>> updateApp({
+  Future<UpdateStreamResult> updateApp({
     required String remoteUpdateFolder,
     required List<FileHashModel?> changedFiles,
   }) {
