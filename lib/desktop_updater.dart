@@ -25,7 +25,7 @@ class DesktopUpdater {
     return Future.value("Hello from DesktopUpdater!");
   }
 
-  /// Uygulamayı kapatır ve yeniden başlatır
+  /// Closes the app and restarts it
   Future<void> restartApp() {
     return DesktopUpdaterPlatform.instance.restartApp();
   }

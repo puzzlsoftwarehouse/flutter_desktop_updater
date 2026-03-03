@@ -22,24 +22,23 @@ Future<List<FileHashModel?>> prepareUpdateAppFunction({
     dir = dir.parent;
   }
 
-  // Eğer belirtilen yol bir dizinse
+  // If the given path is a directory
   if (await dir.exists()) {
-    // temp dizini oluşturulur
+    // Create temp directory
     final tempDir = await Directory.systemTemp.createTemp("desktop_updater");
 
-    // Download oldHashFilePath
+    // Download hashes file
     final client = http.Client();
 
     final newHashFileUrl = "$remoteUpdateFolder/hashes.json";
     final newHashFileRequest = http.Request("GET", Uri.parse(newHashFileUrl));
     final newHashFileResponse = await client.send(newHashFileRequest);
 
-    // temp dizinindeki dosyaları kopyala
-    // dir + output.txt dosyası oluşturulur
+    // Create output file in temp dir
     final outputFile =
         File("${tempDir.path}${Platform.pathSeparator}hashes.json");
 
-    // Çıktı dosyasını açıyoruz
+    // Open output file for writing
     final sink = outputFile.openWrite();
 
     // Save the file

@@ -19,8 +19,8 @@ class FileDownloader {
     return _instance!;
   }
 
-  /// Descarta o singleton e o Dio para que o próximo download use instância nova.
-  /// Chamar após cancelar para garantir que não reste estado/conexões.
+  /// Discards the singleton and Dio so the next download uses a new instance.
+  /// Call after cancel to ensure no leftover state or connections.
   static void reset() {
     _instance?._dio = null;
     _instance = null;
@@ -89,17 +89,24 @@ class FileDownloader {
   bool _isNetworkErrorObject(Object? e) {
     if (e == null) return false;
     if (e is SocketException || e is OSError) return true;
-    final s = e.toString().toLowerCase();
+    return isNetworkErrorString(e.toString());
+  }
+
+  /// Shared check for network error from an error message string.
+  /// Used by download and update so the same patterns apply everywhere.
+  static bool isNetworkErrorString(String message) {
+    final s = message.toLowerCase();
     return s.contains('socket') ||
         s.contains('connection') ||
         s.contains('timeout') ||
         s.contains('network') ||
         s.contains('host lookup') ||
         s.contains('nodename nor servname') ||
-        s.contains('errno') ||
         s.contains('refused') ||
         s.contains('reset') ||
-        s.contains('websocket');
+        s.contains('websocket') ||
+        s.contains('no connection') ||
+        s.contains('network error');
   }
 
   /// Downloads a file with progress reporting.
@@ -150,13 +157,13 @@ class FileDownloader {
     } on DioException catch (e) {
       if (e.type == DioExceptionType.cancel) rethrow;
       if (checkIsNetworkError(e)) {
-        throw Exception("Sem conexão / erro de rede: ${e.message}\n  File: $filePath");
+        throw Exception("No connection / network error: ${e.message}\n  File: $filePath");
       }
       throw Exception("Failed to download file: $url\n  File: $filePath\n  Error: ${e.message}");
     } catch (e) {
-      if (e is Exception && e.toString().contains("Sem conexão")) rethrow;
+      if (e is Exception && e.toString().contains("No connection")) rethrow;
       if (_isNetworkErrorObject(e)) {
-        throw Exception("Sem conexão / erro de rede\n  File: $filePath\n  Error: $e");
+        throw Exception("No connection / network error\n  File: $filePath\n  Error: $e");
       }
       throw Exception("Failed to download file: $url\n  File: $filePath\n  Error: $e");
     }

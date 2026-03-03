@@ -41,23 +41,6 @@ class UpdateStreamResult {
   final Future<DownloadCompleteResult> whenComplete;
 }
 
-bool _isNetworkError(String errorMessage) {
-  final lower = errorMessage.toLowerCase();
-  return lower.contains('socketexception') ||
-      lower.contains('failed host lookup') ||
-      lower.contains('nodename nor servname') ||
-      lower.contains('errno') ||
-      lower.contains('connection') ||
-      lower.contains('timeout') ||
-      lower.contains('network') ||
-      lower.contains('connection refused') ||
-      lower.contains('connection reset') ||
-      lower.contains('sem conexão') ||
-      lower.contains('erro de rede') ||
-      lower.contains('websocket') ||
-      lower.contains('socket');
-}
-
 Future<bool> _canWriteToDirectory(Directory dir) async {
   try {
     final testFile = File(path.join(dir.path, ".write_test"));
@@ -194,7 +177,7 @@ Future<UpdateStreamResult> updateAppFunction({
       final useTemp = downloadPath != dir.path;
 
       if (useTemp) {
-        debugPrint("Usando pasta temp para download: $downloadPath");
+        debugPrint("Using temp folder for download: $downloadPath");
       }
 
       var receivedBytes = 0.0;
@@ -256,8 +239,8 @@ Future<UpdateStreamResult> updateAppFunction({
               final receivedMb = (receivedBytes * 1024).toInt();
               final totalMb = (totalLengthKB * 1024).toInt();
               print(
-                  "[Update] $ok/$totalFiles arquivos (${pct.toStringAsFixed(0)}%), "
-                  "$failed falhas, ${_formatBytes(receivedMb)} / ${_formatBytes(totalMb)}");
+                "[Update] $ok/$totalFiles files (${pct.toStringAsFixed(0)}%), "
+                "$failed failed, ${_formatBytes(receivedMb)} / ${_formatBytes(totalMb)}");
             }
 
             summaryTimer = Timer.periodic(summaryInterval, (_) {
@@ -466,7 +449,7 @@ Future<UpdateStreamResult> updateAppFunction({
                   }
                   final endTime = DateTime.now();
                   final duration = endTime.difference(startTime);
-                  final isNetwork = _isNetworkError(error.toString());
+                  final isNetwork = FileDownloader.isNetworkErrorString(error.toString());
 
                   downloadResults.add({
                     "file": file.filePath,
@@ -520,7 +503,7 @@ Future<UpdateStreamResult> updateAppFunction({
                     if (!responseStream.isClosed) {
                       responseStream.addError(
                         Exception(
-                            "Sem conexão / erro de rede. Download interrompido.\n  $error"),
+                            "No connection / network error. Download aborted.\n  $error"),
                         stackTrace,
                       );
                       responseStream.close();
@@ -590,10 +573,10 @@ Future<UpdateStreamResult> updateAppFunction({
             if (!cancelled) {
               final elapsed = DateTime.now().difference(downloadStartTime);
               final totalMb = (totalLengthKB * 1024).toInt();
-              print("[Update] Concluído: $ok sucesso, $failed falhas, "
-                  "${_formatBytes(totalMb)} em ${_formatDuration(elapsed)}");
+              print("[Update] Completed: $ok success, $failed failed, "
+                  "${_formatBytes(totalMb)} in ${_formatDuration(elapsed)}");
               if (failed > 0) {
-                print("[Update] Detalhes das falhas em: ${logDir.path}");
+                print("[Update] Failure details at: ${logDir.path}");
               }
               await _saveDownloadLog(
                 updateFolder: updateFolder,
@@ -614,7 +597,7 @@ Future<UpdateStreamResult> updateAppFunction({
                 failedCount: 0,
                 failedFilePaths: [],
                 cancelled: false,
-                hadNetworkError: _isNetworkError(e.toString()),
+                hadNetworkError: FileDownloader.isNetworkErrorString(e.toString()),
                 networkErrorFilePaths: [],
               ));
             }
@@ -640,7 +623,7 @@ Future<UpdateStreamResult> updateAppFunction({
         failedCount: 0,
         failedFilePaths: [],
         cancelled: true,
-        hadNetworkError: _isNetworkError(e.toString()),
+        hadNetworkError: FileDownloader.isNetworkErrorString(e.toString()),
         networkErrorFilePaths: [],
       ));
     }
@@ -733,10 +716,10 @@ Future<void> _saveDownloadLogPeriodic({
 
     await sink.close();
     if (getCancelled?.call() ?? false) return;
-    debugPrint("Log periódico: $progressPercent%");
+    debugPrint("Periodic log: $progressPercent%");
   } catch (e) {
     if (getCancelled?.call() ?? false) return;
-    debugPrint("Erro ao salvar log periódico: $e");
+    debugPrint("Error saving periodic log: $e");
   }
 }
 
@@ -889,9 +872,9 @@ Future<void> _saveDownloadLog({
 
     await sink.close();
 
-    debugPrint("Log de download: ${logFile.path}");
+    debugPrint("Download log: ${logFile.path}");
   } catch (e) {
-    debugPrint("Erro ao salvar log de download: $e");
+    debugPrint("Error saving download log: $e");
   }
 }
 
