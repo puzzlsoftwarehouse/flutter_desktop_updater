@@ -53,19 +53,20 @@ namespace desktop_updater
     char buffer[2048];
     va_list args;
     va_start(args, format);
-    vsnLog(buffer, sizeof(buffer), format, args);
+    vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
     char timestamp[32];
-    snLog(timestamp, sizeof(timestamp), "[%04d-%02d-%02d %02d:%02d:%02d] ",
+    snprintf(timestamp, sizeof(timestamp), "[%04d-%02d-%02d %02d:%02d:%02d] ",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
-    FILE* f = _wfopen(logPath.c_str(), L"a");
+    FILE* f = nullptr;
+    _wfopen_s(&f, logPath.c_str(), L"a");
     if (f)
     {
-      fLog(f, "%s%s", timestamp, buffer);
+      fprintf(f, "%s%s", timestamp, buffer);
       fclose(f);
     }
   }
@@ -810,7 +811,7 @@ namespace desktop_updater
 
       // Build the query string using the first translation
       wchar_t subBlock[50];
-      swLog(subBlock, 50, L"\\StringFileInfo\\%04x%04x\\ProductVersion",
+      swprintf(subBlock, 50, L"\\StringFileInfo\\%04x%04x\\ProductVersion",
                lpTranslate[0].wLanguage, lpTranslate[0].wCodePage);
 
       if (!VerQueryValueW(verData.data(), subBlock, (LPVOID *)&lpBuffer, &size))
