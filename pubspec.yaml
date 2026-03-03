@@ -1,6 +1,10 @@
 name: desktop_updater
 description: "Flutter desktop updater plugin supporting Windows, macOS, and Linux. It can download and install updates for your application from GitHub, GitLab, local file systems, and S3."
+<<<<<<< HEAD
 version: 1.5.3
+=======
+version: 1.5.2
+>>>>>>> db715cf (bump version to 1.5.2)
 homepage: https://github.com/MarlonJD/flutter_desktop_updater
 repository: https://github.com/MarlonJD/flutter_desktop_updater
 
