@@ -39,6 +39,7 @@ namespace desktop_updater
   std::vector<DWORD> FindProcessesByExecutable(const wchar_t* executablePath);
   bool KillProcess(DWORD processId);
   void KillAllProcessesByExecutable(const wchar_t* executablePath);
+  void WaitUntilNoProcessesRunning(const wchar_t* executablePath, DWORD timeoutSeconds = 30);
 
   DWORD g_parentProcessId = 0;
 
@@ -351,6 +352,42 @@ namespace desktop_updater
         KillProcess(pid);
       }
     }
+  }
+
+  void WaitUntilNoProcessesRunning(const wchar_t* executablePath, DWORD timeoutSeconds)
+  {
+    DWORD currentPid = GetCurrentProcessId();
+    DWORD startTime = GetTickCount();
+    DWORD timeoutMs = timeoutSeconds * 1000;
+
+    Log("Aguardando todos os processos encerrarem definitivamente...\n");
+
+    while ((GetTickCount() - startTime) < timeoutMs)
+    {
+      std::vector<DWORD> remaining = FindProcessesByExecutable(executablePath);
+      bool anyAlive = false;
+
+      for (DWORD pid : remaining)
+      {
+        if (pid != currentPid && IsProcessRunning(pid))
+        {
+          Log("Processo %lu ainda está vivo, aguardando...\n", pid);
+          anyAlive = true;
+          break;
+        }
+      }
+
+      if (!anyAlive)
+      {
+        Log("Nenhum processo restante. Aguardando OS liberar handles...\n");
+        Sleep(1000);
+        return;
+      }
+
+      Sleep(500);
+    }
+
+    Log("Timeout aguardando processos encerrarem. Prosseguindo mesmo assim...\n");
   }
 
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds)
