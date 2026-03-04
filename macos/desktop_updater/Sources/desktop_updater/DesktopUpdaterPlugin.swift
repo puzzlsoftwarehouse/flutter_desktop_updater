@@ -360,7 +360,7 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         fi
 
         # Wait for the application to start
-        TIMEOUT=15
+        TIMEOUT=60
         COUNT=0
         while ! is_app_running && [ $COUNT -lt $TIMEOUT ]; do
             sleep 1
