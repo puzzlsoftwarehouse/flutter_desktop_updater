@@ -106,7 +106,10 @@ namespace desktop_updater
     std::wstring searchPath = std::wstring(tempPath) + L"desktop_updater_download*";
     WIN32_FIND_DATAW findData;
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    
+
+    std::wstring bestPath;
+    FILETIME bestTime = {0, 0};
+
     if (hFind != INVALID_HANDLE_VALUE)
     {
       do
@@ -116,20 +119,25 @@ namespace desktop_updater
           if (wcscmp(findData.cFileName, L".") != 0 && wcscmp(findData.cFileName, L"..") != 0)
           {
             std::wstring foundPath = std::wstring(tempPath) + findData.cFileName + L"\\update";
-            
+
             if (PathFileExistsW(foundPath.c_str()))
             {
-              FindClose(hFind);
-              return foundPath;
+              FILETIME ft = findData.ftLastWriteTime;
+              if (bestPath.empty() ||
+                  CompareFileTime(&ft, &bestTime) > 0)
+              {
+                bestPath = foundPath;
+                bestTime = ft;
+              }
             }
           }
         }
       } while (FindNextFileW(hFind, &findData) != 0);
-      
+
       FindClose(hFind);
     }
-    
-    return L"";
+
+    return bestPath;
   }
 
   DWORD GetParentProcessId()
@@ -438,15 +446,7 @@ namespace desktop_updater
     {
       Log("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(300);
-    }
-
-    Log("Verificando se o executável está liberado...\n");
-    if (!WaitForExecutableToBeFree(executable_path, 3))
-    {
-      Log("Executável ainda em uso. Forçando encerramento novamente...\n");
-      KillAllProcessesByExecutable(executable_path);
-      Sleep(300);
+      Sleep(500);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -459,6 +459,7 @@ namespace desktop_updater
       Log("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
+    Log("Diretório de destino: %ls\n", destDir.c_str());
     Log("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
     
@@ -701,15 +702,7 @@ namespace desktop_updater
     {
       Log("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(300);
-    }
-
-    Log("Verificando se o executável está liberado...\n");
-    if (!WaitForExecutableToBeFree(executable_path, 3))
-    {
-      Log("Executável ainda em uso. Forçando encerramento novamente...\n");
-      KillAllProcessesByExecutable(executable_path);
-      Sleep(300);
+      Sleep(500);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -722,6 +715,7 @@ namespace desktop_updater
       Log("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
+    Log("Diretório de destino: %ls\n", destDir.c_str());
     Log("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
