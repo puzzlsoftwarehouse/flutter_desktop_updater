@@ -34,8 +34,9 @@ bool _pathEquals(String a, String b) {
 
 Future<List<FileHashModel?>> verifyFileHashes(
   String oldHashFilePath,
-  String newHashFilePath,
-) async {
+  String newHashFilePath, {
+  bool returnAllOnAnyChange = false,
+}) async {
   if (oldHashFilePath == newHashFilePath) {
     return [];
   }
@@ -81,6 +82,10 @@ Future<List<FileHashModel?>> verifyFileHashes(
         ),
       );
     }
+  }
+
+  if (returnAllOnAnyChange && changes.isNotEmpty) {
+    return newHashes;
   }
 
   return changes;
