@@ -244,6 +244,14 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         log_message "Waiting before launching application..."
         sleep 1
 
+        # Re-sign the bundle ad-hoc to fix the code signature after file replacement
+        log_message "Re-signing application bundle ad-hoc..."
+        if codesign --force --deep --sign - "$APP_BUNDLE_PATH" 2>&1 | tee -a "$LOG_FILE"; then
+            log_message "  ✓ App bundle re-signed successfully"
+        else
+            log_message "  ⚠ Warning: Re-signing failed, app may not launch"
+        fi
+
         # Try to open the application
         log_message "Launching application..."
         xattr -dr com.apple.quarantine "$APP_BUNDLE_PATH" 2>/dev/null || true
