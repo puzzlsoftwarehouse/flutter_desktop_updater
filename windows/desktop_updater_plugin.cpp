@@ -627,7 +627,7 @@ namespace desktop_updater
     wchar_t args[64];
     swprintf_s(args, 64, L"--update-elevated %lu", currentPid);
 
-    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args, NULL, SW_SHOW);
+    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args, NULL, SW_HIDE);
 
     if ((INT_PTR)result > 32)
     {

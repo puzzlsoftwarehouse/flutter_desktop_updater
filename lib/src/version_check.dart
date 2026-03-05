@@ -132,6 +132,7 @@ Future<ItemModel?> versionCheckFunction({
       final changedFiles = await verifyFileHashes(
         oldHashFilePath,
         newHashFilePath,
+        returnAllOnAnyChange: Platform.isMacOS,
       );
 
       return latestVersion.copyWith(

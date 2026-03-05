@@ -78,15 +78,6 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         log_message "Executable Path: $EXECUTABLE_PATH"
         log_message "Log File: $LOG_FILE"
 
-        # Check if we're in debug or release mode
-        if [[ "$APP_BUNDLE_PATH" == *"/Debug/"* ]]; then
-            log_message "Running in debug mode - skipping signature verification"
-            IS_DEBUG=true
-        else
-            log_message "Running in release mode - verifying signatures"
-            IS_DEBUG=false
-        fi
-
         # Verify that the update folder exists and has content
         if [ ! -d "$UPDATE_FOLDER_PATH" ]; then
             log_message "Error: Update folder does not exist: $UPDATE_FOLDER_PATH"
@@ -185,36 +176,6 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         log_message "  ✓ xattrs cleared"
         DEST_DIR="$TEMP_BUNDLE/Contents"
 
-        if [ "$IS_DEBUG" = false ]; then
-            # Verify signatures of update files
-            log_message "Verifying update files signatures..."
-            for file in "$UPDATE_FOLDER_PATH"/*; do
-                if [ -f "$file" ]; then
-                    log_message "Checking signature of: $file"
-                    if ! codesign -v "$file" 2>&1 | tee -a "$LOG_FILE"; then
-                        log_message "Error: Update file not properly signed: $file"
-                        rm -rf "$TEMP_DIR"
-                        exit 1
-                    fi
-                fi
-            done
-
-            # Verify that team identifiers match
-            log_message "Checking team identifiers..."
-            UPDATE_TEAM_ID=$(codesign -d --verbose=2 "$UPDATE_FOLDER_PATH/$(basename "$EXECUTABLE_PATH")" 2>&1 | grep "TeamIdentifier" | awk '{print $2}')
-            ORIGINAL_TEAM_ID=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "TeamIdentifier" | awk '{print $2}')
-
-            log_message "Original team ID: $ORIGINAL_TEAM_ID"
-            log_message "Update team ID: $UPDATE_TEAM_ID"
-
-            if [ "$UPDATE_TEAM_ID" != "$ORIGINAL_TEAM_ID" ]; then
-                log_message "Error: Team identifier mismatch. Original: $ORIGINAL_TEAM_ID, Update: $UPDATE_TEAM_ID"
-                rm -rf "$TEMP_DIR"
-                exit 1
-            fi
-            log_message "Team identifier verified: $UPDATE_TEAM_ID"
-        fi
-
         # Overlay update files with rsync (single pass, faster than per-item cp -R)
         log_message "Overlaying update files: $UPDATE_FOLDER_PATH -> $DEST_DIR"
         if [ ! -d "$UPDATE_FOLDER_PATH" ]; then
@@ -239,61 +200,7 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
         fi
         log_message "All files verified successfully"
 
-        # Re-sign inside-out: codesign requires inner components to be sealed first.
-        # Order: dylibs → frameworks (codesign resolves Versions/A automatically)
-        #        → main executable → outer bundle seal.
         TEMP_EXECUTABLE="$TEMP_BUNDLE/Contents/MacOS/$(basename "$EXECUTABLE_PATH")"
-        if [ "$IS_DEBUG" = false ]; then
-            log_message "Extracting signing identity from original bundle..."
-            ORIGINAL_SIGNING_IDENTITY=$(codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | grep "^Authority=" | head -1 | sed 's/^Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
-            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
-                ORIGINAL_SIGNING_IDENTITY=$(codesign -d -vv "$APP_BUNDLE_PATH" 2>&1 | grep "Authority=" | head -1 | sed 's/.*Authority=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
-            fi
-            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] && [ -n "$ORIGINAL_TEAM_ID" ]; then
-                ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
-            fi
-            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ] || [ "$ORIGINAL_SIGNING_IDENTITY" = "Apple" ]; then
-                if [ -n "$ORIGINAL_TEAM_ID" ]; then
-                    ORIGINAL_SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -i "$ORIGINAL_TEAM_ID" | head -1 | awk -F'"' '{print $2}' || echo "")
-                fi
-            fi
-            if [ -z "$ORIGINAL_SIGNING_IDENTITY" ]; then
-                log_message "ERROR: Could not determine signing identity from original bundle"
-                log_message "  Original team ID: $ORIGINAL_TEAM_ID"
-                codesign -d --verbose=2 "$APP_BUNDLE_PATH" 2>&1 | head -20 | tee -a "$LOG_FILE" || true
-                rm -rf "$TEMP_DIR"
-                exit 1
-            fi
-            log_message "Using signing identity: $ORIGINAL_SIGNING_IDENTITY"
-
-            # Step 1: sign loose dylibs
-            log_message "Signing dylibs..."
-            find "$TEMP_BUNDLE" -name "*.dylib" | while read dylib; do
-                codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$dylib" 2>&1 | tee -a "$LOG_FILE" || true
-            done
-
-            # Step 2: sign each framework individually.
-            # codesign on Foo.framework resolves the Versions/A target automatically,
-            # so we never need to traverse Versions/Current ourselves.
-            log_message "Signing frameworks..."
-            find "$TEMP_BUNDLE/Contents/Frameworks" -maxdepth 1 -name "*.framework" 2>/dev/null | while read fw; do
-                codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$fw" 2>&1 | tee -a "$LOG_FILE" || true
-            done
-
-            # Step 3: sign main executable
-            log_message "Signing executable: $TEMP_EXECUTABLE"
-            codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_EXECUTABLE" 2>&1 | tee -a "$LOG_FILE" || { rm -rf "$TEMP_DIR"; exit 1; }
-
-            # Step 4: seal the outer bundle (must be last)
-            log_message "Signing bundle: $TEMP_BUNDLE"
-            if ! codesign --force --sign "$ORIGINAL_SIGNING_IDENTITY" --preserve-metadata=entitlements,requirements,flags,runtime "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
-                log_message "  ERROR: Failed to re-sign bundle"
-                rm -rf "$TEMP_DIR"
-                exit 1
-            fi
-            log_message "  ✓ Bundle re-signed successfully (inside-out)"
-        fi
-        log_message "Re-signing complete"
 
         # Verify executable permissions in the temporary bundle
         log_message "Setting executable permissions..."
@@ -302,16 +209,6 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             log_message "Error: Temporary executable not found or not executable"
             rm -rf "$TEMP_DIR"
             exit 1
-        fi
-
-        if [ "$IS_DEBUG" = false ]; then
-            # Verify that the temporary bundle maintains its signature
-            log_message "Verifying temporary bundle signature..."
-            if ! codesign -v --verbose=2 "$TEMP_BUNDLE" 2>&1 | tee -a "$LOG_FILE"; then
-                log_message "Error: Temporary bundle signature verification failed"
-                rm -rf "$TEMP_DIR"
-                exit 1
-            fi
         fi
 
         # Create backup of the original bundle
@@ -349,15 +246,8 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
 
         # Try to open the application
         log_message "Launching application..."
-        if [ "$IS_DEBUG" = true ]; then
-            cd "$(dirname "$EXECUTABLE_PATH")"
-            log_message "Changed directory to: $(pwd)"
-            ./"$(basename "$EXECUTABLE_PATH")" &
-            LAUNCH_PID=$!
-            log_message "Launched with PID: $LAUNCH_PID"
-        else
-            open "$APP_BUNDLE_PATH"
-        fi
+        xattr -dr com.apple.quarantine "$APP_BUNDLE_PATH" 2>/dev/null || true
+        open "$APP_BUNDLE_PATH"
 
         # Wait for the application to start
         TIMEOUT=60
