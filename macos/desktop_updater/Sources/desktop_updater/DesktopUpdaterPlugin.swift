@@ -183,7 +183,7 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             rm -rf "$TEMP_DIR"
             exit 1
         fi
-        if rsync -a --exclude='*.log' "$UPDATE_FOLDER_PATH/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
+        if rsync -a --delete --exclude='*.log' "$UPDATE_FOLDER_PATH/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"; then
             log_message "  ✓ Update files overlayed (rsync)"
         else
             log_message "ERROR: rsync overlay failed"
