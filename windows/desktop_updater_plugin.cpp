@@ -29,8 +29,8 @@ namespace desktop_updater
 {
 
   // Forward declarations
-  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
-  void runBatFile();
+  void createPs1File(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
+  void runPs1File();
   std::wstring FindTempUpdateDirectory();
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds = 60);
   DWORD GetParentProcessId();
@@ -487,13 +487,13 @@ namespace desktop_updater
     }
 
     Log("Diretório de destino: %ls\n", destDir.c_str());
-    Log("Criando arquivo .bat para atualização...\n");
-    createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
+    Log("Criando arquivo .ps1 para atualização...\n");
+    createPs1File(updateDir, destDir, executable_path, tempUpdateDir);
 
     WaitUntilNoProcessesRunning(executable_path, 30);
 
-    Log("Executando arquivo .bat...\n");
-    runBatFile();
+    Log("Executando arquivo .ps1...\n");
+    runPs1File();
 
     ExitProcess(0);
   }
@@ -529,8 +529,8 @@ namespace desktop_updater
 
   DesktopUpdaterPlugin::~DesktopUpdaterPlugin() {}
 
-  // Modify the createBatFile function to accept parameters and use them in the bat script
-  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
+  // Modify the createPs1File function to accept parameters and use them in the ps1 script
+  void createPs1File(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
   {
     // Convert wide strings to regular strings using Windows API for proper conversion
     int updateSize = WideCharToMultiByte(CP_UTF8, 0, updateDir.c_str(), -1, NULL, 0, NULL, NULL);
@@ -555,45 +555,42 @@ namespace desktop_updater
       std::string tempDirStr(tempDirSize, 0);
       WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, &tempDirStr[0], tempDirSize, NULL, NULL);
       tempDirStr.pop_back(); // Remove null terminator
-      
+
       size_t lastSlash = tempDirStr.find_last_of("\\/");
       if (lastSlash != std::string::npos)
       {
         std::string parentTempDir = tempDirStr.substr(0, lastSlash);
-        cleanupTempDir = "rmdir /S /Q \"" + parentTempDir + "\"\n";
+        cleanupTempDir = "Remove-Item -Path \"" + parentTempDir + "\" -Recurse -Force -ErrorAction SilentlyContinue\n";
       }
     }
 
-    const std::string batScript =
-        "@echo off\n"
-        "chcp 65001 > NUL\n"
-        "timeout /t 2 /nobreak > NUL\n"
-        "xcopy /E /I /Y \"" +
-        updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
-    
-    std::string finalScript = batScript;
-    
+    const std::string ps1Script =
+        "Start-Sleep -Seconds 10\n"
+        "Copy-Item -Path \"" +
+        updateDirStr + "\\*\" -Destination \"" + destDirStr + "\" -Recurse -Force\n";
+
+    std::string finalScript = ps1Script;
+
     if (!tempUpdateDir.empty())
     {
       finalScript += cleanupTempDir;
     }
     else
     {
-      finalScript += "rmdir /S /Q \"" + updateDirStr + "\"\n";
+      finalScript += "Remove-Item -Path \"" + updateDirStr + "\" -Recurse -Force -ErrorAction SilentlyContinue\n";
     }
-    
-    finalScript +=
-        "timeout /t 1 /nobreak > NUL\n"
-        "start \"\" \"" +
-        exePathStr + "\"\n"
-                     "timeout /t 1 /nobreak > NUL\n"
-                     "del update_script.bat\n"
-                     "exit\n";
 
-    std::ofstream batFile("update_script.bat");
-    batFile << finalScript;
-    batFile.close();
-    Log("Temporary .bat created.\n");
+    finalScript +=
+        "Start-Sleep -Seconds 1\n"
+        "Start-Process \"" +
+        exePathStr + "\"\n"
+                     "Start-Sleep -Seconds 1\n"
+                     "# Remove-Item -Path $PSCommandPath -Force\n";
+
+    std::ofstream ps1File("update_script.ps1");
+    ps1File << finalScript;
+    ps1File.close();
+    Log("Temporary .ps1 created.\n");
   }
 
   // Check if the current process is running with administrator privileges
@@ -640,12 +637,12 @@ namespace desktop_updater
     }
   }
 
-  void runBatFile()
+  void runPs1File()
   {
     STARTUPINFO si = {sizeof(si)};
     PROCESS_INFORMATION pi;
 
-    WCHAR cmdLine[] = L"cmd.exe /c update_script.bat";
+    WCHAR cmdLine[] = L"powershell.exe -ExecutionPolicy Bypass -File update_script.ps1";
     if (CreateProcess(
             NULL,
             cmdLine,
@@ -663,7 +660,7 @@ namespace desktop_updater
     }
     else
     {
-      Log("Failed to run the .bat file.\n");
+      Log("Failed to run the .ps1 file.\n");
     }
   }
 
@@ -742,13 +739,13 @@ namespace desktop_updater
     }
 
     Log("Diretório de destino: %ls\n", destDir.c_str());
-    Log("Criando arquivo .bat para atualização...\n");
-    createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
+    Log("Criando arquivo .ps1 para atualização...\n");
+    createPs1File(updateDir, destDir, executable_path, tempUpdateDir);
 
     WaitUntilNoProcessesRunning(executable_path, 30);
 
-    Log("Executando arquivo .bat...\n");
-    runBatFile();
+    Log("Executando arquivo .ps1...\n");
+    runPs1File();
 
     ExitProcess(0);
   }
