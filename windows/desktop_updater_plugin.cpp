@@ -429,8 +429,7 @@ namespace desktop_updater
       printf("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
-    Log("Diretório de destino: %ls\n", destDir.c_str());
-    Log("Criando arquivo .bat para atualização...\n");
+    printf("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
     
     printf("Executando arquivo .bat...\n");
@@ -522,6 +521,14 @@ namespace desktop_updater
     {
       finalScript += "rmdir /S /Q \"" + updateDirStr + "\"\n";
     }
+    
+    finalScript +=
+        "timeout /t 1 /nobreak > NUL\n"
+        "start \"\" \"" +
+        exePathStr + "\"\n"
+                     "timeout /t 1 /nobreak > NUL\n"
+                     "del update_script.bat\n"
+                     "exit\n";
 
     fs::path batPath = fs::path(destDir) / L"update_script.bat";
     std::ofstream batFile(batPath, std::ios::binary);
@@ -529,7 +536,7 @@ namespace desktop_updater
     batFile.write(reinterpret_cast<const char*>(bom), 3);
     batFile << finalScript;
     batFile.close();
-    Log("Temporary .bat created.\n");
+    std::cout << "Temporary .bat created.\n";
   }
 
   // Check if the current process is running with administrator privileges
