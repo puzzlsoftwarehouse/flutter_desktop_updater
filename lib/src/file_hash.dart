@@ -23,6 +23,15 @@ Future<String> getFileHash(File file) async {
   }
 }
 
+bool _pathEquals(String a, String b) {
+  final na = a.replaceAll(r'\', '/');
+  final nb = b.replaceAll(r'\', '/');
+  if (Platform.isWindows) {
+    return na.toLowerCase() == nb.toLowerCase();
+  }
+  return na == nb;
+}
+
 Future<List<FileHashModel?>> verifyFileHashes(
   String oldHashFilePath,
   String newHashFilePath,
@@ -56,8 +65,10 @@ Future<List<FileHashModel?>> verifyFileHashes(
   final changes = <FileHashModel?>[];
 
   for (final newHash in newHashes) {
+    final newPath = newHash?.filePath ?? "";
     final oldHash = oldHashes.firstWhere(
-      (element) => element?.filePath == newHash?.filePath,
+      (element) =>
+          element?.filePath != null && _pathEquals(element!.filePath, newPath),
       orElse: () => null,
     );
 

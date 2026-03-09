@@ -142,7 +142,9 @@ class FileDownloader {
           "  File path: $filePath");
     }
 
-    final url = "$host/$filePath";
+    final pathSegments = filePath.replaceAll(r'\', '/').split('/');
+    final encodedPath = pathSegments.map((s) => Uri.encodeComponent(s)).join('/');
+    final url = "$host/$encodedPath";
     final dio = _getDio();
 
     try {
