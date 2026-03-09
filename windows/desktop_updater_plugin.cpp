@@ -27,9 +27,9 @@ namespace fs = std::filesystem;
 namespace desktop_updater
 {
 
-  // Forward declarations
+  std::wstring GetExecutableDirectory();
   void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
-  void runBatFile();
+  void runBatFile(const std::wstring &workingDir);
   std::wstring FindTempUpdateDirectory();
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds = 60);
   DWORD GetParentProcessId();
@@ -147,6 +147,16 @@ namespace desktop_updater
 
     CloseHandle(hProcess);
     return false;
+  }
+
+  std::wstring GetExecutableDirectory()
+  {
+    wchar_t buf[MAX_PATH];
+    if (GetModuleFileNameW(NULL, buf, MAX_PATH) == 0) return L"";
+    std::wstring path(buf);
+    size_t last = path.find_last_of(L"\\/");
+    if (last == std::wstring::npos) return L"";
+    return path.substr(0, last);
   }
 
   std::wstring NormalizePath(const wchar_t* path)
@@ -411,7 +421,8 @@ namespace desktop_updater
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
-    std::wstring destDir = L".";
+    std::wstring destDir = GetExecutableDirectory();
+    if (destDir.empty()) destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
@@ -422,7 +433,7 @@ namespace desktop_updater
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
     
     printf("Executando arquivo .bat...\n");
-    runBatFile();
+    runBatFile(destDir);
 
     ExitProcess(0);
   }
@@ -519,7 +530,10 @@ namespace desktop_updater
                      "del update_script.bat\n"
                      "exit\n";
 
-    std::ofstream batFile("update_script.bat");
+    fs::path batPath = fs::path(destDir) / L"update_script.bat";
+    std::ofstream batFile(batPath, std::ios::binary);
+    const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+    batFile.write(reinterpret_cast<const char*>(bom), 3);
     batFile << finalScript;
     batFile.close();
     std::cout << "Temporary .bat created.\n";
@@ -569,13 +583,13 @@ namespace desktop_updater
     }
   }
 
-  void runBatFile()
+  void runBatFile(const std::wstring &workingDir)
   {
     STARTUPINFO si = {sizeof(si)};
     PROCESS_INFORMATION pi;
 
     WCHAR cmdLine[] = L"cmd.exe /c update_script.bat";
-    if (CreateProcess(
+    if (CreateProcessW(
             NULL,
             cmdLine,
             NULL,
@@ -583,7 +597,7 @@ namespace desktop_updater
             FALSE,
             CREATE_NO_WINDOW,
             NULL,
-            NULL,
+            workingDir.empty() ? NULL : workingDir.c_str(),
             &si,
             &pi))
     {
@@ -670,7 +684,8 @@ namespace desktop_updater
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
-    std::wstring destDir = L".";
+    std::wstring destDir = GetExecutableDirectory();
+    if (destDir.empty()) destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
@@ -681,7 +696,7 @@ namespace desktop_updater
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
     printf("Executando arquivo .bat...\n");
-    runBatFile();
+    runBatFile(destDir);
 
     ExitProcess(0);
   }
