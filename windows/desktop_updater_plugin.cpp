@@ -21,7 +21,6 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
-#include <cstdarg>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -39,38 +38,8 @@ namespace desktop_updater
   std::vector<DWORD> FindProcessesByExecutable(const wchar_t* executablePath);
   bool KillProcess(DWORD processId);
   void KillAllProcessesByExecutable(const wchar_t* executablePath);
-  void WaitUntilNoProcessesRunning(const wchar_t* executablePath, DWORD timeoutSeconds = 30);
 
   DWORD g_parentProcessId = 0;
-
-  static void Log(const char* format, ...)
-  {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
-    if (lastSlash) *(lastSlash + 1) = L'\0';
-    std::wstring logPath = std::wstring(exePath) + L"updater_log.txt";
-
-    char buffer[2048];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char timestamp[32];
-    snprintf(timestamp, sizeof(timestamp), "[%04d-%02d-%02d %02d:%02d:%02d] ",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-    FILE* f = nullptr;
-    _wfopen_s(&f, logPath.c_str(), L"a");
-    if (f)
-    {
-      fprintf(f, "%s%s", timestamp, buffer);
-      fclose(f);
-    }
-  }
 
   bool CheckForElevatedUpdate()
   {
@@ -107,10 +76,7 @@ namespace desktop_updater
     std::wstring searchPath = std::wstring(tempPath) + L"desktop_updater_download*";
     WIN32_FIND_DATAW findData;
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-
-    std::wstring bestPath;
-    FILETIME bestTime = {0, 0};
-
+    
     if (hFind != INVALID_HANDLE_VALUE)
     {
       do
@@ -120,25 +86,20 @@ namespace desktop_updater
           if (wcscmp(findData.cFileName, L".") != 0 && wcscmp(findData.cFileName, L"..") != 0)
           {
             std::wstring foundPath = std::wstring(tempPath) + findData.cFileName + L"\\update";
-
+            
             if (PathFileExistsW(foundPath.c_str()))
             {
-              FILETIME ft = findData.ftLastWriteTime;
-              if (bestPath.empty() ||
-                  CompareFileTime(&ft, &bestTime) > 0)
-              {
-                bestPath = foundPath;
-                bestTime = ft;
-              }
+              FindClose(hFind);
+              return foundPath;
             }
           }
         }
       } while (FindNextFileW(hFind, &findData) != 0);
-
+      
       FindClose(hFind);
     }
-
-    return bestPath;
+    
+    return L"";
   }
 
   DWORD GetParentProcessId()
@@ -275,7 +236,7 @@ namespace desktop_updater
 
   bool WaitForExecutableToBeFree(const wchar_t* executablePath, DWORD timeoutSeconds)
   {
-    Log("Verificando se o executável está liberado: %ls\n", executablePath);
+    printf("Verificando se o executável está liberado: %ls\n", executablePath);
     
     DWORD startTime = GetTickCount();
     DWORD timeoutMs = timeoutSeconds * 1000;
@@ -286,7 +247,7 @@ namespace desktop_updater
       if (hFile != INVALID_HANDLE_VALUE)
       {
         CloseHandle(hFile);
-        Log("Executável está liberado.\n");
+        printf("Executável está liberado.\n");
         return true;
       }
 
@@ -298,12 +259,12 @@ namespace desktop_updater
       }
       else
       {
-        Log("Erro ao verificar arquivo: %lu\n", error);
+        printf("Erro ao verificar arquivo: %lu\n", error);
         return false;
       }
     }
 
-    Log("Timeout aguardando executável ser liberado.\n");
+    printf("Timeout aguardando executável ser liberado.\n");
     return false;
   }
 
@@ -315,26 +276,26 @@ namespace desktop_updater
       DWORD error = GetLastError();
       if (error == ERROR_INVALID_PARAMETER)
       {
-        Log("Processo %lu já não existe mais.\n", processId);
+        printf("Processo %lu já não existe mais.\n", processId);
         return true;
       }
-      Log("Não foi possível abrir o processo %lu para encerrar. Erro: %lu\n", processId, error);
+      printf("Não foi possível abrir o processo %lu para encerrar. Erro: %lu\n", processId, error);
       return false;
     }
 
-    Log("Forçando encerramento do processo %lu...\n", processId);
+    printf("Forçando encerramento do processo %lu...\n", processId);
     BOOL result = TerminateProcess(hProcess, 1);
     CloseHandle(hProcess);
 
     if (result)
     {
-      Log("Processo %lu encerrado forçadamente.\n", processId);
+      printf("Processo %lu encerrado forçadamente.\n", processId);
       Sleep(200);
       return true;
     }
     else
     {
-      Log("Falha ao encerrar processo %lu. Erro: %lu\n", processId, GetLastError());
+      printf("Falha ao encerrar processo %lu. Erro: %lu\n", processId, GetLastError());
       return false;
     }
   }
@@ -348,53 +309,17 @@ namespace desktop_updater
     {
       if (pid != currentPid && IsProcessRunning(pid))
       {
-        Log("Matando processo %lu...\n", pid);
+        printf("Matando processo %lu...\n", pid);
         KillProcess(pid);
       }
     }
-  }
-
-  void WaitUntilNoProcessesRunning(const wchar_t* executablePath, DWORD timeoutSeconds)
-  {
-    DWORD currentPid = GetCurrentProcessId();
-    DWORD startTime = GetTickCount();
-    DWORD timeoutMs = timeoutSeconds * 1000;
-
-    Log("Aguardando todos os processos encerrarem definitivamente...\n");
-
-    while ((GetTickCount() - startTime) < timeoutMs)
-    {
-      std::vector<DWORD> remaining = FindProcessesByExecutable(executablePath);
-      bool anyAlive = false;
-
-      for (DWORD pid : remaining)
-      {
-        if (pid != currentPid && IsProcessRunning(pid))
-        {
-          Log("Processo %lu ainda está vivo, aguardando...\n", pid);
-          anyAlive = true;
-          break;
-        }
-      }
-
-      if (!anyAlive)
-      {
-        Log("Nenhum processo restante. Aguardando OS liberar handles...\n");
-        Sleep(1000);
-        return;
-      }
-
-      Sleep(500);
-    }
-
-    Log("Timeout aguardando processos encerrarem. Prosseguindo mesmo assim...\n");
   }
 
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds)
   {
     if (!IsProcessRunning(processId))
     {
-      Log("Processo %lu já encerrado.\n", processId);
+      printf("Processo %lu já encerrado.\n", processId);
       return true;
     }
 
@@ -404,32 +329,32 @@ namespace desktop_updater
       DWORD error = GetLastError();
       if (error == ERROR_INVALID_PARAMETER)
       {
-        Log("Processo %lu não existe mais (já encerrado).\n", processId);
+        printf("Processo %lu não existe mais (já encerrado).\n", processId);
         return true;
       }
-      Log("Não foi possível abrir o processo %lu. Erro: %lu\n", processId, error);
+      printf("Não foi possível abrir o processo %lu. Erro: %lu\n", processId, error);
       return false;
     }
 
-    Log("Aguardando processo %lu encerrar (timeout: %lu segundos)...\n", processId, timeoutSeconds);
+    printf("Aguardando processo %lu encerrar (timeout: %lu segundos)...\n", processId, timeoutSeconds);
     DWORD waitResult = WaitForSingleObject(hProcess, timeoutSeconds * 1000);
     CloseHandle(hProcess);
 
     if (waitResult == WAIT_OBJECT_0)
     {
-      Log("Processo %lu encerrado com sucesso.\n", processId);
+      printf("Processo %lu encerrado com sucesso.\n", processId);
       Sleep(200);
       return true;
     }
     else if (waitResult == WAIT_TIMEOUT)
     {
-      Log("Timeout aguardando processo %lu encerrar. Forçando encerramento...\n", processId);
+      printf("Timeout aguardando processo %lu encerrar. Forçando encerramento...\n", processId);
       KillProcess(processId);
       return true;
     }
     else
     {
-      Log("Erro ao aguardar processo %lu: %lu. Tentando forçar encerramento...\n", processId, waitResult);
+      printf("Erro ao aguardar processo %lu: %lu. Tentando forçar encerramento...\n", processId, waitResult);
       KillProcess(processId);
       return true;
     }
@@ -437,11 +362,11 @@ namespace desktop_updater
 
   void ExecuteElevatedUpdate()
   {
-    Log("Executando processo de atualização elevado...\n");
+    printf("Executando processo de atualização elevado...\n");
     
     wchar_t executable_path[MAX_PATH];
     GetModuleFileNameW(NULL, executable_path, MAX_PATH);
-    Log("Caminho do executável: %ls\n", executable_path);
+    printf("Caminho do executável: %ls\n", executable_path);
 
     DWORD parentPid = g_parentProcessId;
     if (parentPid == 0)
@@ -450,24 +375,24 @@ namespace desktop_updater
     }
 
     std::vector<DWORD> allProcesses = FindProcessesByExecutable(executable_path);
-    Log("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
+    printf("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
 
     if (parentPid != 0)
     {
-      Log("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
-      WaitForProcessToExit(parentPid, 15);
+      printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
+      WaitForProcessToExit(parentPid, 3);
     }
 
     for (DWORD pid : allProcesses)
     {
       if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
       {
-        Log("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
-        WaitForProcessToExit(pid, 15);
+        printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
+        WaitForProcessToExit(pid, 2);
       }
     }
 
-    Log("Verificando processos restantes...\n");
+    printf("Verificando processos restantes...\n");
     allProcesses = FindProcessesByExecutable(executable_path);
     bool hasRunningProcesses = false;
     for (DWORD pid : allProcesses)
@@ -481,9 +406,17 @@ namespace desktop_updater
 
     if (hasRunningProcesses)
     {
-      Log("Ainda há processos rodando. Forçando encerramento de todos...\n");
+      printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(500);
+      Sleep(300);
+    }
+
+    printf("Verificando se o executável está liberado...\n");
+    if (!WaitForExecutableToBeFree(executable_path, 3))
+    {
+      printf("Executável ainda em uso. Forçando encerramento novamente...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(300);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -493,7 +426,7 @@ namespace desktop_updater
 
     if (!tempUpdateDir.empty())
     {
-      Log("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
+      printf("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
     Log("Diretório de destino: %ls\n", destDir.c_str());
@@ -537,8 +470,8 @@ namespace desktop_updater
 
   DesktopUpdaterPlugin::~DesktopUpdaterPlugin() {}
 
-  // Modify the createPs1File function to accept parameters and use them in the ps1 script
-  void createPs1File(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
+  // Modify the createBatFile function to accept parameters and use them in the bat script
+  void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
   {
     // Convert wide strings to regular strings using Windows API for proper conversion
     int updateSize = WideCharToMultiByte(CP_UTF8, 0, updateDir.c_str(), -1, NULL, 0, NULL, NULL);
@@ -563,29 +496,31 @@ namespace desktop_updater
       std::string tempDirStr(tempDirSize, 0);
       WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, &tempDirStr[0], tempDirSize, NULL, NULL);
       tempDirStr.pop_back(); // Remove null terminator
-
+      
       size_t lastSlash = tempDirStr.find_last_of("\\/");
       if (lastSlash != std::string::npos)
       {
         std::string parentTempDir = tempDirStr.substr(0, lastSlash);
-        cleanupTempDir = "Remove-Item -Path \"" + parentTempDir + "\" -Recurse -Force -ErrorAction SilentlyContinue\n";
+        cleanupTempDir = "rmdir /S /Q \"" + parentTempDir + "\"\n";
       }
     }
 
-    const std::string ps1Script =
-        "Start-Sleep -Seconds 10\n"
-        "Copy-Item -Path \"" +
-        updateDirStr + "\\*\" -Destination \"" + destDirStr + "\" -Recurse -Force\n";
-
-    std::string finalScript = ps1Script;
-
+    const std::string batScript =
+        "@echo off\n"
+        "chcp 65001 > NUL\n"
+        "timeout /t 2 /nobreak > NUL\n"
+        "xcopy /E /I /Y \"" +
+        updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
+    
+    std::string finalScript = batScript;
+    
     if (!tempUpdateDir.empty())
     {
       finalScript += cleanupTempDir;
     }
     else
     {
-      finalScript += "Remove-Item -Path \"" + updateDirStr + "\" -Recurse -Force -ErrorAction SilentlyContinue\n";
+      finalScript += "rmdir /S /Q \"" + updateDirStr + "\"\n";
     }
 
     fs::path batPath = fs::path(destDir) / L"update_script.bat";
@@ -628,7 +563,7 @@ namespace desktop_updater
     wchar_t args[64];
     swprintf_s(args, 64, L"--update-elevated %lu", currentPid);
 
-    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args, NULL, SW_HIDE);
+    HINSTANCE result = ShellExecuteW(NULL, L"runas", exePath, args, NULL, SW_SHOW);
 
     if ((INT_PTR)result > 32)
     {
@@ -636,7 +571,7 @@ namespace desktop_updater
     }
     else
     {
-      Log("Falha ao obter privilegios de administrador. Codigo de erro: %lld\n", (long long)(INT_PTR)result);
+      std::wcout << L"Falha ao obter privilégios de administrador. Código de erro: " << (INT_PTR)result << std::endl;
       return false;
     }
   }
@@ -664,56 +599,56 @@ namespace desktop_updater
     }
     else
     {
-      Log("Failed to run the .ps1 file.\n");
+      std::cout << "Failed to run the .bat file.\n";
     }
   }
 
   void RestartApp()
   {
-    Log("Reiniciando a aplicação...\n");
+    printf("Reiniciando a aplicação...\n");
 
     if (!IsRunningAsAdmin())
     {
-      Log("Não está rodando como administrador. Solicitando elevação...\n");
+      printf("Não está rodando como administrador. Solicitando elevação...\n");
       
       if (RequestAdminPrivileges())
       {
-        Log("Processo elevado iniciado. Encerrando processo atual.\n");
+        printf("Processo elevado iniciado. Encerrando processo atual.\n");
         ExitProcess(0);
       }
       else
       {
-        Log("Falha ao obter privilégios de administrador. Atualização cancelada.\n");
+        printf("Falha ao obter privilégios de administrador. Atualização cancelada.\n");
         return;
       }
     }
 
-    Log("Rodando com privilégios de administrador. Procedendo com atualização...\n");
+    printf("Rodando com privilégios de administrador. Procedendo com atualização...\n");
 
     wchar_t executable_path[MAX_PATH];
     GetModuleFileNameW(NULL, executable_path, MAX_PATH);
-    Log("Caminho do executável: %ls\n", executable_path);
+    printf("Caminho do executável: %ls\n", executable_path);
 
     DWORD parentPid = GetParentProcessId();
     std::vector<DWORD> allProcesses = FindProcessesByExecutable(executable_path);
-    Log("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
+    printf("Encontrados %zu processo(s) usando o executável.\n", allProcesses.size());
 
     if (parentPid != 0 && parentPid != GetCurrentProcessId())
     {
-      Log("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
-      WaitForProcessToExit(parentPid, 15);
+      printf("Aguardando processo original (PID: %lu) encerrar...\n", parentPid);
+      WaitForProcessToExit(parentPid, 3);
     }
 
     for (DWORD pid : allProcesses)
     {
       if (pid != GetCurrentProcessId() && IsProcessRunning(pid))
       {
-        Log("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
-        WaitForProcessToExit(pid, 15);
+        printf("Aguardando processo adicional (PID: %lu) encerrar...\n", pid);
+        WaitForProcessToExit(pid, 2);
       }
     }
 
-    Log("Verificando processos restantes...\n");
+    printf("Verificando processos restantes...\n");
     allProcesses = FindProcessesByExecutable(executable_path);
     bool hasRunningProcesses = false;
     for (DWORD pid : allProcesses)
@@ -727,9 +662,17 @@ namespace desktop_updater
 
     if (hasRunningProcesses)
     {
-      Log("Ainda há processos rodando. Forçando encerramento de todos...\n");
+      printf("Ainda há processos rodando. Forçando encerramento de todos...\n");
       KillAllProcessesByExecutable(executable_path);
-      Sleep(500);
+      Sleep(300);
+    }
+
+    printf("Verificando se o executável está liberado...\n");
+    if (!WaitForExecutableToBeFree(executable_path, 3))
+    {
+      printf("Executável ainda em uso. Forçando encerramento novamente...\n");
+      KillAllProcessesByExecutable(executable_path);
+      Sleep(300);
     }
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
@@ -739,12 +682,11 @@ namespace desktop_updater
 
     if (!tempUpdateDir.empty())
     {
-      Log("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
+      printf("Diretório de atualização temporário encontrado: %ls\n", tempUpdateDir.c_str());
     }
 
-    Log("Diretório de destino: %ls\n", destDir.c_str());
-    Log("Criando arquivo .ps1 para atualização...\n");
-    createPs1File(updateDir, destDir, executable_path, tempUpdateDir);
+    printf("Criando arquivo .bat para atualização...\n");
+    createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
     printf("Executando arquivo .bat...\n");
     runBatFile(destDir);
