@@ -237,8 +237,9 @@ public class DesktopUpdaterPlugin: NSObject, FlutterPlugin {
             exit 1
         fi
 
-        # Clean up temporary directory
+        # Clean up temporary directory and update folder
         rm -rf "$TEMP_DIR"
+        rm -rf "$UPDATE_FOLDER_PATH"
 
         # Brief pause before launching
         log_message "Waiting before launching application..."
