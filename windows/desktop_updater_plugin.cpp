@@ -507,8 +507,18 @@ namespace desktop_updater
     const std::string batScript =
         "@echo off\n"
         "chcp 65001 > NUL\n"
+        "set attempts=0\n"
+        ":waitloop\n"
         "taskkill /F /IM octodone.exe /T > NUL\n"
-        "timeout /t 30 /nobreak > NUL\n"
+        "tasklist /FI \"IMAGENAME eq octodone.exe\" 2>NUL | find /I \"octodone.exe\" > NUL\n"
+        "if not errorlevel 1 (\n"
+        "    set /a attempts+=1\n"
+        "    if !attempts! lss 30 (\n"
+        "        timeout /t 2 /nobreak > NUL\n"
+        "        goto waitloop\n"
+        "    )\n"
+        ")\n"
+        "timeout /t 10 /nobreak > NUL\n"
         "xcopy /E /I /Y \"" +
         updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
     
@@ -524,10 +534,10 @@ namespace desktop_updater
     }
     
     finalScript +=
-        "timeout /t 15 /nobreak > NUL\n"
+        "timeout /t 5 /nobreak > NUL\n"
         "start \"\" \"" +
         exePathStr + "\"\n"
-                     "timeout /t 15 /nobreak > NUL\n"
+                     "timeout /t 5 /nobreak > NUL\n"
                      "del update_script.bat\n"
                      "exit\n";
 
