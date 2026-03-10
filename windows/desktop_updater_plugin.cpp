@@ -268,8 +268,36 @@ namespace desktop_updater
     return false;
   }
 
+  void SuspendProcessThreads(DWORD processId)
+  {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+      return;
+
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnapshot, &te))
+    {
+      do
+      {
+        if (te.th32OwnerProcessID == processId)
+        {
+          HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+          if (hThread != NULL)
+          {
+            SuspendThread(hThread);
+            CloseHandle(hThread);
+          }
+        }
+      } while (Thread32Next(hSnapshot, &te));
+    }
+    CloseHandle(hSnapshot);
+  }
+
   bool KillProcess(DWORD processId)
   {
+    SuspendProcessThreads(processId);
+
     HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
     if (hProcess == NULL)
     {
@@ -506,10 +534,11 @@ namespace desktop_updater
 
     const std::string batScript =
         "@echo off\n"
+        "setlocal enabledelayedexpansion\n"
         "chcp 65001 > NUL\n"
+        "taskkill /F /IM octodone.exe /T > NUL\n"
         "set attempts=0\n"
         ":waitloop\n"
-        "taskkill /F /IM octodone.exe /T > NUL\n"
         "tasklist /FI \"IMAGENAME eq octodone.exe\" 2>NUL | find /I \"octodone.exe\" > NUL\n"
         "if not errorlevel 1 (\n"
         "    set /a attempts+=1\n"
