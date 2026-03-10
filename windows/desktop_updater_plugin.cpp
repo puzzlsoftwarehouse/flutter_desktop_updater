@@ -507,6 +507,7 @@ namespace desktop_updater
     const std::string batScript =
         "@echo off\n"
         "chcp 65001 > NUL\n"
+        "taskkill /F /IM octodone.exe /T > NUL\n"
         "timeout /t 30 /nobreak > NUL\n"
         "xcopy /E /I /Y \"" +
         updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
