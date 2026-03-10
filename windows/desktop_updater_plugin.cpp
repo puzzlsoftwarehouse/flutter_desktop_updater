@@ -507,7 +507,7 @@ namespace desktop_updater
     const std::string batScript =
         "@echo off\n"
         "chcp 65001 > NUL\n"
-        "timeout /t 2 /nobreak > NUL\n"
+        "timeout /t 30 /nobreak > NUL\n"
         "xcopy /E /I /Y \"" +
         updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
     
@@ -523,10 +523,10 @@ namespace desktop_updater
     }
     
     finalScript +=
-        "timeout /t 1 /nobreak > NUL\n"
+        "timeout /t 15 /nobreak > NUL\n"
         "start \"\" \"" +
         exePathStr + "\"\n"
-                     "timeout /t 1 /nobreak > NUL\n"
+                     "timeout /t 15 /nobreak > NUL\n"
                      "del update_script.bat\n"
                      "exit\n";
 
