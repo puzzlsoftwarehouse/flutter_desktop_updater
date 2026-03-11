@@ -536,7 +536,7 @@ namespace desktop_updater
         "@echo off\n"
         "setlocal enabledelayedexpansion\n"
         "chcp 65001 > NUL\n"
-        "taskkill /F /IM octodone.exe /T > NUL\n"
+        "powershell -Command \"Get-Process octodone -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }\" > NUL 2>&1\n"
         "set attempts=0\n"
         ":waitloop\n"
         "tasklist /FI \"IMAGENAME eq octodone.exe\" 2>NUL | find /I \"octodone.exe\" > NUL\n"
