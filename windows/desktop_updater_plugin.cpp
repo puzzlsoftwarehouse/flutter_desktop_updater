@@ -27,9 +27,9 @@ namespace fs = std::filesystem;
 namespace desktop_updater
 {
 
-  // Forward declarations
+  std::wstring GetExecutableDirectory();
   void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
-  void runBatFile();
+  void runBatFile(const std::wstring &workingDir);
   std::wstring FindTempUpdateDirectory();
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds = 60);
   DWORD GetParentProcessId();
@@ -149,6 +149,16 @@ namespace desktop_updater
     return false;
   }
 
+  std::wstring GetExecutableDirectory()
+  {
+    wchar_t buf[MAX_PATH];
+    if (GetModuleFileNameW(NULL, buf, MAX_PATH) == 0) return L"";
+    std::wstring path(buf);
+    size_t last = path.find_last_of(L"\\/");
+    if (last == std::wstring::npos) return L"";
+    return path.substr(0, last);
+  }
+
   std::wstring NormalizePath(const wchar_t* path)
   {
     wchar_t normalizedPath[MAX_PATH];
@@ -258,8 +268,36 @@ namespace desktop_updater
     return false;
   }
 
+  void SuspendProcessThreads(DWORD processId)
+  {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+      return;
+
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnapshot, &te))
+    {
+      do
+      {
+        if (te.th32OwnerProcessID == processId)
+        {
+          HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+          if (hThread != NULL)
+          {
+            SuspendThread(hThread);
+            CloseHandle(hThread);
+          }
+        }
+      } while (Thread32Next(hSnapshot, &te));
+    }
+    CloseHandle(hSnapshot);
+  }
+
   bool KillProcess(DWORD processId)
   {
+    SuspendProcessThreads(processId);
+
     HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
     if (hProcess == NULL)
     {
@@ -411,7 +449,8 @@ namespace desktop_updater
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
-    std::wstring destDir = L".";
+    std::wstring destDir = GetExecutableDirectory();
+    if (destDir.empty()) destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
@@ -422,7 +461,7 @@ namespace desktop_updater
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
     
     printf("Executando arquivo .bat...\n");
-    runBatFile();
+    runBatFile(destDir);
 
     ExitProcess(0);
   }
@@ -495,8 +534,20 @@ namespace desktop_updater
 
     const std::string batScript =
         "@echo off\n"
+        "setlocal enabledelayedexpansion\n"
         "chcp 65001 > NUL\n"
-        "timeout /t 2 /nobreak > NUL\n"
+        "powershell -Command \"Get-Process octodone -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }\" > NUL 2>&1\n"
+        "set attempts=0\n"
+        ":waitloop\n"
+        "tasklist /FI \"IMAGENAME eq octodone.exe\" 2>NUL | find /I \"octodone.exe\" > NUL\n"
+        "if not errorlevel 1 (\n"
+        "    set /a attempts+=1\n"
+        "    if !attempts! lss 30 (\n"
+        "        timeout /t 2 /nobreak > NUL\n"
+        "        goto waitloop\n"
+        "    )\n"
+        ")\n"
+        "timeout /t 10 /nobreak > NUL\n"
         "xcopy /E /I /Y \"" +
         updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
     
@@ -512,14 +563,17 @@ namespace desktop_updater
     }
     
     finalScript +=
-        "timeout /t 1 /nobreak > NUL\n"
+        "timeout /t 5 /nobreak > NUL\n"
         "start \"\" \"" +
         exePathStr + "\"\n"
-                     "timeout /t 1 /nobreak > NUL\n"
+                     "timeout /t 5 /nobreak > NUL\n"
                      "del update_script.bat\n"
                      "exit\n";
 
-    std::ofstream batFile("update_script.bat");
+    fs::path batPath = fs::path(destDir) / L"update_script.bat";
+    std::ofstream batFile(batPath, std::ios::binary);
+    const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+    batFile.write(reinterpret_cast<const char*>(bom), 3);
     batFile << finalScript;
     batFile.close();
     std::cout << "Temporary .bat created.\n";
@@ -569,13 +623,13 @@ namespace desktop_updater
     }
   }
 
-  void runBatFile()
+  void runBatFile(const std::wstring &workingDir)
   {
     STARTUPINFO si = {sizeof(si)};
     PROCESS_INFORMATION pi;
 
     WCHAR cmdLine[] = L"cmd.exe /c update_script.bat";
-    if (CreateProcess(
+    if (CreateProcessW(
             NULL,
             cmdLine,
             NULL,
@@ -583,7 +637,7 @@ namespace desktop_updater
             FALSE,
             CREATE_NO_WINDOW,
             NULL,
-            NULL,
+            workingDir.empty() ? NULL : workingDir.c_str(),
             &si,
             &pi))
     {
@@ -670,7 +724,8 @@ namespace desktop_updater
 
     std::wstring tempUpdateDir = FindTempUpdateDirectory();
     std::wstring updateDir = tempUpdateDir.empty() ? L"update" : tempUpdateDir;
-    std::wstring destDir = L".";
+    std::wstring destDir = GetExecutableDirectory();
+    if (destDir.empty()) destDir = L".";
 
     if (!tempUpdateDir.empty())
     {
@@ -681,7 +736,7 @@ namespace desktop_updater
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
     printf("Executando arquivo .bat...\n");
-    runBatFile();
+    runBatFile(destDir);
 
     ExitProcess(0);
   }

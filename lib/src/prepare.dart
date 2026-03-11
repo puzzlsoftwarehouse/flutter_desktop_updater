@@ -57,6 +57,7 @@ Future<List<FileHashModel?>> prepareUpdateAppFunction({
     final changes = await verifyFileHashes(
       oldHashFilePath,
       newHashFilePath,
+      returnAllOnAnyChange: Platform.isMacOS,
     );
 
     return changes;

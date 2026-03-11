@@ -163,9 +163,10 @@ Future<UpdateStreamResult> updateAppFunction({
             "updates",
           );
           updateFolder = Directory(path.join(downloadPath, "update"));
-          if (!await updateFolder.exists()) {
-            await updateFolder.create(recursive: true);
+          if (await updateFolder.exists()) {
+            await updateFolder.delete(recursive: true);
           }
+          await updateFolder.create(recursive: true);
         } else {
           downloadPath = await _getDownloadPath(dir);
           updateFolder = Directory(path.join(downloadPath, "update"));
