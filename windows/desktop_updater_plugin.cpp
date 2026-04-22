@@ -26,10 +26,56 @@
 namespace fs = std::filesystem;
 namespace desktop_updater
 {
+  namespace
+  {
+    std::string WideToUtf8(const std::wstring &w)
+    {
+      if (w.empty())
+      {
+        return std::string();
+      }
+      const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+      if (n <= 0)
+      {
+        return std::string();
+      }
+      std::string s(static_cast<size_t>(n), 0);
+      WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
+      s.pop_back();
+      return s;
+    }
+
+    void ExeNamePartsFromPath(const std::wstring &fullPath, std::wstring *outFileName, std::wstring *outBaseName)
+    {
+      std::wstring file = fullPath;
+      const size_t p = file.find_last_of(L"\\/");
+      if (p != std::wstring::npos)
+      {
+        file = file.substr(p + 1);
+      }
+      *outFileName = file;
+      *outBaseName = file;
+      if (file.length() > 4)
+      {
+        std::wstring ext = file.substr(file.length() - 4);
+        for (wchar_t &c : ext)
+        {
+          if (c >= L'A' && c <= L'Z')
+          {
+            c = static_cast<wchar_t>(c - L'A' + L'a');
+          }
+        }
+        if (ext == L".exe")
+        {
+          *outBaseName = file.substr(0, file.length() - 4);
+        }
+      }
+    }
+  } // namespace
 
   std::wstring GetExecutableDirectory();
   void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir = L"");
-  void runBatFile(const std::wstring &workingDir);
+  bool runBatFile(const std::wstring &workingDir);
   std::wstring FindTempUpdateDirectory();
   bool WaitForProcessToExit(DWORD processId, DWORD timeoutSeconds = 60);
   DWORD GetParentProcessId();
@@ -459,9 +505,13 @@ namespace desktop_updater
 
     printf("Criando arquivo .bat para atualização...\n");
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
-    
+
     printf("Executando arquivo .bat...\n");
-    runBatFile(destDir);
+    if (!runBatFile(destDir))
+    {
+      printf("Atualizacao: falha na copia (script retornou erro).\n");
+      ExitProcess(1);
+    }
 
     ExitProcess(0);
   }
@@ -497,83 +547,99 @@ namespace desktop_updater
 
   DesktopUpdaterPlugin::~DesktopUpdaterPlugin() {}
 
-  // Modify the createBatFile function to accept parameters and use them in the bat script
   void createBatFile(const std::wstring &updateDir, const std::wstring &destDir, const wchar_t *executable_path, const std::wstring &tempUpdateDir)
   {
-    // Convert wide strings to regular strings using Windows API for proper conversion
-    int updateSize = WideCharToMultiByte(CP_UTF8, 0, updateDir.c_str(), -1, NULL, 0, NULL, NULL);
-    std::string updateDirStr(updateSize, 0);
-    WideCharToMultiByte(CP_UTF8, 0, updateDir.c_str(), -1, &updateDirStr[0], updateSize, NULL, NULL);
-    updateDirStr.pop_back(); // Remove null terminator
+    const std::string updateDirStr = WideToUtf8(updateDir);
+    const std::string destDirStr = WideToUtf8(destDir);
+    const std::string exePathStr = WideToUtf8(executable_path);
 
-    int destSize = WideCharToMultiByte(CP_UTF8, 0, destDir.c_str(), -1, NULL, 0, NULL, NULL);
-    std::string destDirStr(destSize, 0);
-    WideCharToMultiByte(CP_UTF8, 0, destDir.c_str(), -1, &destDirStr[0], destSize, NULL, NULL);
-    destDirStr.pop_back(); // Remove null terminator
+    std::wstring wExeName;
+    std::wstring wBaseName;
+    ExeNamePartsFromPath(executable_path, &wExeName, &wBaseName);
+    const std::string imageNameStr = WideToUtf8(wExeName);
+    const std::string procNameStr = WideToUtf8(wBaseName);
 
-    int exePathSize = WideCharToMultiByte(CP_UTF8, 0, executable_path, -1, NULL, 0, NULL, NULL);
-    std::string exePathStr(exePathSize, 0);
-    WideCharToMultiByte(CP_UTF8, 0, executable_path, -1, &exePathStr[0], exePathSize, NULL, NULL);
-    exePathStr.pop_back(); // Remove null terminator
-
-    std::string cleanupTempDir = "";
+    std::string cleanupTempDir;
     if (!tempUpdateDir.empty())
     {
-      int tempDirSize = WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, NULL, 0, NULL, NULL);
-      std::string tempDirStr(tempDirSize, 0);
-      WideCharToMultiByte(CP_UTF8, 0, tempUpdateDir.c_str(), -1, &tempDirStr[0], tempDirSize, NULL, NULL);
-      tempDirStr.pop_back(); // Remove null terminator
-      
-      size_t lastSlash = tempDirStr.find_last_of("\\/");
+      const std::string tempDirStr = WideToUtf8(tempUpdateDir);
+      const size_t lastSlash = tempDirStr.find_last_of("\\/");
       if (lastSlash != std::string::npos)
       {
-        std::string parentTempDir = tempDirStr.substr(0, lastSlash);
+        const std::string parentTempDir = tempDirStr.substr(0, lastSlash);
         cleanupTempDir = "rmdir /S /Q \"" + parentTempDir + "\"\n";
       }
     }
 
-    const std::string batScript =
+    std::string finalScript;
+    finalScript.reserve(4000U);
+    finalScript +=
         "@echo off\n"
         "setlocal enabledelayedexpansion\n"
         "chcp 65001 > NUL\n"
-        "powershell -Command \"Get-Process octodone -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }\" > NUL 2>&1\n"
+        "set \"UPD_DIR=" +
+        updateDirStr +
+        "\"\n"
+        "set \"DEST_DIR=" +
+        destDirStr +
+        "\"\n"
+        "set \"UPD_EXEPATH=" +
+        exePathStr +
+        "\"\n"
+        "set \"UPDATER_IMAGE_NAME=" +
+        imageNameStr +
+        "\"\n"
+        "set \"UPDATER_PROC_NAME=" +
+        procNameStr +
+        "\"\n"
+        "if defined UPDATER_PROC_NAME (powershell -NoProfile -Command \"if ($env:UPDATER_PROC_NAME) { Get-Process -Name $env:UPDATER_PROC_NAME -ErrorAction SilentlyContinue | Stop-Process -Force }\" >NUL 2>&1)\n"
         "set attempts=0\n"
         ":waitloop\n"
-        "tasklist /FI \"IMAGENAME eq octodone.exe\" 2>NUL | find /I \"octodone.exe\" > NUL\n"
+        "if not defined UPDATER_IMAGE_NAME goto :postwait\n"
+        "tasklist /FI \"IMAGENAME eq %UPDATER_IMAGE_NAME%\" 2>NUL | findstr /I \"%UPDATER_IMAGE_NAME%\" >NUL\n"
         "if not errorlevel 1 (\n"
-        "    set /a attempts+=1\n"
-        "    if !attempts! lss 30 (\n"
-        "        timeout /t 2 /nobreak > NUL\n"
-        "        goto waitloop\n"
-        "    )\n"
+        "  set /a attempts+=1\n"
+        "  if !attempts! lss 30 (\n"
+        "    timeout /t 2 /nobreak > NUL\n"
+        "    goto :waitloop\n"
+        "  )\n"
         ")\n"
+        ":postwait\n"
         "timeout /t 10 /nobreak > NUL\n"
-        "xcopy /E /I /Y \"" +
-        updateDirStr + "\\*\" \"" + destDirStr + "\\\"\n";
-    
-    std::string finalScript = batScript;
-    
+        "if not exist \"!UPD_DIR!\\.\" (\n"
+        "  (echo PASTA_UPDATE_FALTANTE) > \"!DEST_DIR!\\desktop_updater_copy_error.txt\"\n"
+        "  exit /b 1\n"
+        ")\n"
+        "set /a U_ROBO=0\n"
+        ":roboagain\n"
+        "set /a U_ROBO+=1\n"
+        "robocopy \"!UPD_DIR!\" \"!DEST_DIR!\" *.* /E /DCOPY:DAT /COPY:DAT /IS /IT /R:30 /W:2 /MT:4 /NP /NFL /NDL\n"
+        "if not errorlevel 8 goto :robodone\n"
+        "if !U_ROBO! lss 3 (timeout /t 5 /nobreak >NUL& goto :roboagain)\n"
+        "(echo FALHA_ROBOCOPY) > \"!DEST_DIR!\\desktop_updater_copy_error.txt\"\n"
+        "exit /b 1\n"
+        ":robodone\n";
+
     if (!tempUpdateDir.empty())
     {
       finalScript += cleanupTempDir;
     }
     else
     {
-      finalScript += "rmdir /S /Q \"" + updateDirStr + "\"\n";
+      finalScript += "rmdir /S /Q \"!UPD_DIR!\"\n";
     }
-    
+
     finalScript +=
         "timeout /t 5 /nobreak > NUL\n"
-        "start \"\" \"" +
-        exePathStr + "\"\n"
-                     "timeout /t 5 /nobreak > NUL\n"
-                     "del update_script.bat\n"
-                     "exit\n";
+        "start \"\" \"!UPD_EXEPATH!\"\n"
+        "timeout /t 5 /nobreak > NUL\n"
+        "del update_script.bat\n"
+        "exit /b 0\n";
 
-    fs::path batPath = fs::path(destDir) / L"update_script.bat";
+    const fs::path batPath = fs::path(destDir) / L"update_script.bat";
     std::ofstream batFile(batPath, std::ios::binary);
-    const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
-    batFile.write(reinterpret_cast<const char*>(bom), 3);
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    batFile.write(reinterpret_cast<const char *>(bom), 3);
     batFile << finalScript;
     batFile.close();
     std::cout << "Temporary .bat created.\n";
@@ -623,31 +689,45 @@ namespace desktop_updater
     }
   }
 
-  void runBatFile(const std::wstring &workingDir)
+  bool runBatFile(const std::wstring &workingDir)
   {
-    STARTUPINFO si = {sizeof(si)};
-    PROCESS_INFORMATION pi;
-
-    WCHAR cmdLine[] = L"cmd.exe /c update_script.bat";
-    if (CreateProcessW(
-            NULL,
-            cmdLine,
-            NULL,
-            NULL,
+    STARTUPINFO si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    wchar_t cmdLineForCreate[] = L"cmd.exe /c update_script.bat";
+    if (!CreateProcessW(
+            nullptr,
+            cmdLineForCreate,
+            nullptr,
+            nullptr,
             FALSE,
             CREATE_NO_WINDOW,
-            NULL,
-            workingDir.empty() ? NULL : workingDir.c_str(),
+            nullptr,
+            workingDir.empty() ? nullptr : workingDir.c_str(),
             &si,
             &pi))
     {
-      CloseHandle(pi.hProcess);
-      CloseHandle(pi.hThread);
-    }
-    else
-    {
       std::cout << "Failed to run the .bat file.\n";
+      return false;
     }
+    const DWORD kWaitMs = 600000U;
+    const DWORD w = WaitForSingleObject(pi.hProcess, kWaitMs);
+    CloseHandle(pi.hThread);
+    if (w == WAIT_TIMEOUT)
+    {
+      (void)TerminateProcess(pi.hProcess, 1U);
+      (void)CloseHandle(pi.hProcess);
+      return false;
+    }
+    if (w != WAIT_OBJECT_0)
+    {
+      (void)CloseHandle(pi.hProcess);
+      return false;
+    }
+    DWORD code = 1U;
+    (void)GetExitCodeProcess(pi.hProcess, &code);
+    (void)CloseHandle(pi.hProcess);
+    return code == 0U;
   }
 
   void RestartApp()
@@ -736,7 +816,11 @@ namespace desktop_updater
     createBatFile(updateDir, destDir, executable_path, tempUpdateDir);
 
     printf("Executando arquivo .bat...\n");
-    runBatFile(destDir);
+    if (!runBatFile(destDir))
+    {
+      printf("Atualizacao: falha na copia (script retornou erro).\n");
+      ExitProcess(1);
+    }
 
     ExitProcess(0);
   }
