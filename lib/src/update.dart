@@ -195,7 +195,7 @@ Future<UpdateStreamResult> updateAppFunction({
 
       final fileProgress = <String, double>{};
 
-      const maxConcurrentDownloads = 64;
+      final maxConcurrentDownloads = Platform.isWindows ? 8 : 64;
       final activeDownloads = <Completer<void>>[];
       final downloadQueue = <FileHashModel>[];
 
@@ -863,7 +863,9 @@ Future<void> _saveDownloadLog({
     sink.writeln("");
 
     if (await updateFolder.exists()) {
-      await _writeDirectoryTree(sink, updateFolder, updateFolder.path, 0);
+      if (!Platform.isWindows) {
+        await _writeDirectoryTree(sink, updateFolder, updateFolder.path, 0);
+      }
     }
 
     sink.writeln("");
