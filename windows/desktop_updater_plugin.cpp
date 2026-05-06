@@ -22,6 +22,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <vector>
+#include <thread>
 
 namespace fs = std::filesystem;
 namespace desktop_updater
@@ -849,8 +850,8 @@ namespace desktop_updater
     }
     else if (method_call.method_name().compare("restartApp") == 0)
     {
-      RestartApp();
       result->Success();
+      std::thread([]() { RestartApp(); }).detach();
     }
     else if (method_call.method_name().compare("getExecutablePath") == 0)
     {
